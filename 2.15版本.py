@@ -16,7 +16,7 @@ logging.basicConfig(
     format='%(asctime)s - %(message)s',
     filemode='w'
 )
-SAVE_DIR = "C:/Users/15800/Desktop/chengshi.xlsx"
+SAVE_DIR = "/Volumes/personal_folder/code/csc/数据/result"
 PREDICTIONS_DIR = os.path.join(SAVE_DIR, "predictions")
 IMPORTANCE_DIR = os.path.join(SAVE_DIR, "importance_plots")
 # 配置参数
@@ -65,6 +65,12 @@ def calculate_correlation(df, target_col):
 def encode_wind_direction(df):
     """优化风向编码"""
     df = df.copy()
+
+    # 检查WINDDIR列是否存在
+    if 'WINDDIR' not in df.columns:
+        print("警告: 数据中未找到WINDDIR列，跳过风向编码")
+        return df
+
     df['winddir_rad'] = np.deg2rad(df['WINDDIR'])
     df['winddir_sin1'] = np.sin(df['winddir_rad'])
     df['winddir_cos1'] = np.cos(df['winddir_rad'])
@@ -75,7 +81,15 @@ def encode_wind_direction(df):
 
 def create_features(df, target_col):
     """创建完整特征集（集成特征筛选）"""
-    all_base_features = BASE_FEATURES + WINDDIR_FEATURES
+    # 动态确定可用的基础特征
+    available_base_features = [f for f in BASE_FEATURES if f in df.columns]
+    available_wind_features = [f for f in WINDDIR_FEATURES if f in df.columns]
+    all_base_features = available_base_features + available_wind_features
+
+    print(f"使用的特征列: {all_base_features}")
+
+    if not all_base_features:
+        raise ValueError("没有可用的基础特征列")
 
     # 特征生成
     feature_list = []
@@ -179,7 +193,7 @@ def train_and_evaluate(X, y):
     return pd.DataFrame(fold_results), feature_importances, all_predictions
 
 
-def plot_predictions(predictions, target):
+def plot_predictions(predictions, target, site_dir=None):
     """绘制预测结果时序图"""
     plt.figure(figsize=(15, 6))
 
@@ -205,70 +219,172 @@ def plot_predictions(predictions, target):
 
     # 保存图片
     # plt.savefig(f'predictions/{target}_prediction_plot.png', dpi=300)
-    plt.savefig(os.path.join(PREDICTIONS_DIR, f'{target}_prediction_plot.png'), dpi=300)
+    if site_dir:
+        plt.savefig(os.path.join(site_dir, f'{target}_prediction_plot.png'), dpi=300)
+    else:
+        plt.savefig(os.path.join(PREDICTIONS_DIR, f'{target}_prediction_plot.png'), dpi=300)
     plt.close()
 
 
-def main(data_path):
-    """主流程"""
-    df = pd.read_excel(data_path, parse_dates=['TIME'], index_col='TIME').ffill()
-    df = encode_wind_direction(df)
-    predictions_dir = os.path.join(SAVE_DIR, "predictions")
-    importance_dir = os.path.join(SAVE_DIR, "importance_plots")
-    os.makedirs(PREDICTIONS_DIR, exist_ok=True)
-    os.makedirs(IMPORTANCE_DIR, exist_ok=True)
+
+
+def process_site_data(df, site_name):
+    """处理单个站点的数据"""
+    # 过滤出当前站点的数据
+    if site_name == 'default':
+        site_df = df.copy()
+    else:
+        site_df = df[df['SITENAME'] == site_name].copy()
+    
+    # 删除SITENAME列，因为它不是特征
+    if 'SITENAME' in site_df.columns:
+        site_df = site_df.drop(columns=['SITENAME'])
+    
+    # 设置时间索引
+    site_df = site_df.set_index('TIME')
+    site_df = site_df.ffill()
+    
+    print(f"处理站点: {site_name}")
+    print(f"站点数据形状: {site_df.shape}")
+    print(f"列名: {list(site_df.columns)}")
+    
+    site_df = encode_wind_direction(site_df)
+    
+    # 创建站点特定的输出目录
+    site_predictions_dir = os.path.join(PREDICTIONS_DIR, site_name)
+    site_importance_dir = os.path.join(IMPORTANCE_DIR, site_name)
+    os.makedirs(site_predictions_dir, exist_ok=True)
+    os.makedirs(site_importance_dir, exist_ok=True)
 
     final_metrics = {}
 
     for target in TARGETS:
-        print(f"\n{'=' * 30}\n处理目标变量: {target}\n{'=' * 30}")
+        # 检查目标变量是否存在
+        if target not in site_df.columns:
+            print(f"警告: 目标变量 {target} 不在站点 {site_name} 的数据中，跳过")
+            continue
 
-        # 特征工程
-        full_data = create_features(df, target)
-        X = full_data.drop(columns=['target'])
-        y = full_data['target']
+        print(f"\n{'=' * 30}\n处理站点 {site_name} 的目标变量: {target}\n{'=' * 30}")
 
-        # 训练评估
-        metrics, importances, predictions = train_and_evaluate(X, y)
+        try:
+            # 特征工程
+            full_data = create_features(site_df, target)
+            X = full_data.drop(columns=['target'])
+            y = full_data['target']
 
-        # 保存预测结果
-        # predictions.to_csv(f'predictions/{target}_predictions.csv', index=False)
-        predictions.to_csv(os.path.join(PREDICTIONS_DIR, f'{target}_predictions.csv'), index=False)
-        # 绘制预测图
-        plot_predictions(predictions, target)
+            print(f"特征数量: {X.shape[1]}, 样本数量: {X.shape[0]}")
 
-        # 处理特征重要性
-        total_importance = importances['avg_importance'].sum()
-        importances['impact_pct'] = (importances['avg_importance'] / total_importance) * 100
-        importances[['avg_importance', 'impact_pct']].to_csv(os.path.join(SAVE_DIR,f'importance_plots/{target}_feature_impact.csv'))
+            # 训练评估
+            metrics, importances, predictions = train_and_evaluate(X, y)
 
-        # 绘制重要性图
-        plt.figure(figsize=(10, 8))
-        importances['impact_pct'].head(20).sort_values().plot.barh(
-            color='#2c7bb6',
-            title=f'{target} - Top 20 Feature Importance (%)'
-        )
-        plt.xlabel('Importance Percentage')
-        plt.tight_layout()
-        plt.savefig(os.path.join(SAVE_DIR,f'importance_plots/{target}_feature_importance.png'), dpi=300)
-        plt.close()
+            # 保存预测结果
+            predictions.to_csv(os.path.join(site_predictions_dir, f'{target}_predictions.csv'), index=False)
+            
+            # 绘制预测图
+            plot_predictions(predictions, target, site_predictions_dir)
 
-        # 记录指标
-        final_metrics[target] = {
-            'R2': metrics['R2'].mean(),
-            'RMSE': metrics['RMSE'].mean(),
-            'MAE': metrics['MAE'].mean()
-        }
+            # 处理特征重要性
+            total_importance = importances['avg_importance'].sum()
+            importances['impact_pct'] = (importances['avg_importance'] / total_importance) * 100
+            importances[['avg_importance', 'impact_pct']].to_csv(os.path.join(site_importance_dir, f'{target}_feature_impact.csv'))
+
+            # 绘制重要性图
+            plt.figure(figsize=(10, 8))
+            importances['impact_pct'].head(20).sort_values().plot.barh(
+                color='#2c7bb6',
+                title=f'{target} - Top 20 Feature Importance (%)'
+            )
+            plt.xlabel('Importance Percentage')
+            plt.tight_layout()
+            plt.savefig(os.path.join(site_importance_dir, f'{target}_feature_importance.png'), dpi=300)
+            plt.close()
+
+            # 记录指标
+            final_metrics[target] = {
+                'R2': metrics['R2'].mean(),
+                'RMSE': metrics['RMSE'].mean(),
+                'MAE': metrics['MAE'].mean()
+            }
+
+            print(f"站点 {site_name} 的 {target} 处理完成 - R2: {final_metrics[target]['R2']:.4f}, "
+                  f"RMSE: {final_metrics[target]['RMSE']:.4f}, MAE: {final_metrics[target]['MAE']:.4f}")
+
+        except Exception as e:
+            print(f"处理站点 {site_name} 的 {target} 时出错: {str(e)}")
+            continue
 
     # 保存最终指标
-    # pd.DataFrame(final_metrics).T.to_csv('model_performance.csv')
-    pd.DataFrame(final_metrics).T.to_csv(os.path.join(PREDICTIONS_DIR, 'model_performance.csv'))
-    print("\n模型训练完成！所有结果已保存。")
+    if final_metrics:
+        pd.DataFrame(final_metrics).T.to_csv(os.path.join(site_predictions_dir, 'model_performance.csv'))
+        print(f"\n站点 {site_name} 模型训练完成！所有结果已保存。")
+    else:
+        print(f"\n站点 {site_name} 没有成功处理任何目标变量。")
     return final_metrics
 
 
+def main(data_path):
+    """主流程 - 按站点分别处理"""
+    # 检查文件是否存在
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(f"数据文件不存在: {data_path}")
+
+    df = pd.read_excel(data_path, parse_dates=['TIME'])
+    
+    # 数据基本信息检查
+    print("数据加载完成:")
+    print(f"数据形状: {df.shape}")
+    print(f"列名: {list(df.columns)}")
+    print(f"时间范围: {df['TIME'].min()} 到 {df['TIME'].max()}")
+
+    # 获取所有站点
+    if 'SITENAME' in df.columns:
+        sites = df['SITENAME'].unique()
+        print(f"检测到站点: {sites}")
+    else:
+        # 如果没有SITENAME列，假设整个数据集就是一个站点
+        sites = ['default']
+        print("未检测到站点信息，将整个数据集作为一个站点处理")
+
+    results = {}
+    
+    if 'SITENAME' in df.columns:
+        # 按站点分别处理
+        for site in sites:
+            print(f"\n{'#' * 50}\n开始处理站点: {site}\n{'#' * 50}")
+            site_data = df[df['SITENAME'] == site].copy()
+            results[site] = process_site_data(site_data, site)
+    else:
+        # 处理无站点信息的数据
+        print(f"\n{'#' * 50}\n开始处理默认站点\n{'#' * 50}")
+        results['default'] = process_site_data(df, 'default')
+    
+    # 保存汇总结果
+    summary = {}
+    for site, metrics in results.items():
+        for target, values in metrics.items():
+            if target not in summary:
+                summary[target] = {}
+            summary[target][site] = values
+    
+    # 为每个污染物创建汇总报告
+    for target in summary:
+        if summary[target]:  # 只有当有数据时才保存
+            summary_df = pd.DataFrame(summary[target]).T
+            summary_df.to_csv(os.path.join(SAVE_DIR, f'{target}_all_sites_performance.csv'))
+    
+    print("\n所有站点处理完成！")
+    return results
+
+
+
+
 if __name__ == "__main__":
-    excel_path = 'C:/Users/15800/Desktop/chengshi1.xlsx'
-    results = main(excel_path)
-    print("\n最终性能指标:")
-    print(pd.DataFrame(results).T)
+    excel_path = '/Volumes/personal_folder/code/csc/数据/2019-2024年19个国控点+上海市小时数据.xlsx'
+    try:
+        results = main(excel_path)
+        print("\n各站点最终性能指标:")
+        for site, metrics in results.items():
+            print(f"\n站点: {site}")
+            print(pd.DataFrame(metrics).T)
+    except Exception as e:
+        print(f"程序执行出错: {str(e)}")
