@@ -4,10 +4,13 @@ from xgboost import XGBRegressor
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 from sklearn.model_selection import TimeSeriesSplit
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
 import matplotlib.pyplot as plt
 import logging
 from scipy import stats
 import os
+import sys
 
 # 配置日志
 logging.basicConfig(
@@ -25,6 +28,8 @@ BASE_FEATURES = ['T', 'WIND', 'SO2', 'P', 'R','NO2','CO']
 N_LAGS = 24
 ROLL_WINDOW = 12
 WINDDIR_FEATURES = ['winddir_sin1', 'winddir_cos1', 'winddir_sin2', 'winddir_cos2']
+# 支持的模型类型
+AVAILABLE_MODELS = ['xgboost', 'random_forest', 'linear_regression']
 
 # 创建输出目录
 os.makedirs(PREDICTIONS_DIR, exist_ok=True)
@@ -130,19 +135,39 @@ def create_features(df, target_col):
     return features[selected_features]
 
 
-def train_and_evaluate(X, y):
-    """改进的模型训练流程（增加预测结果收集）"""
+def get_model(model_type='xgboost'):
+    """根据模型类型返回相应的模型实例"""
+    if model_type == 'xgboost':
+        return XGBRegressor(
+            n_estimators=200,
+            max_depth=4,
+            learning_rate=0.1,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            importance_type='gain',
+            early_stopping_rounds=20,
+            eval_metric='rmse'
+        )
+    elif model_type == 'random_forest':
+        return RandomForestRegressor(
+            n_estimators=100,
+            max_depth=10,
+            min_samples_split=2,
+            min_samples_leaf=1,
+            random_state=42
+        )
+    elif model_type == 'linear_regression':
+        return LinearRegression()
+    else:
+        raise ValueError(f"不支持的模型类型: {model_type}。支持的模型: {AVAILABLE_MODELS}")
+
+def train_and_evaluate(X, y, model_type='xgboost'):
+    """改进的模型训练流程（支持多种模型选择）"""
     tscv = TimeSeriesSplit(n_splits=3)
-    model = XGBRegressor(
-        n_estimators=200,
-        max_depth=4,
-        learning_rate=0.1,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        importance_type='gain',
-        early_stopping_rounds=20,
-        eval_metric='rmse'
-    )
+    model = get_model(model_type)
+    
+    # 特殊处理：线性回归没有特征重要性
+    has_importances = model_type in ['xgboost', 'random_forest']
 
     fold_results = []
     feature_importances = pd.DataFrame()
@@ -158,16 +183,21 @@ def train_and_evaluate(X, y):
         X_val_scaled = scaler.transform(X_val)
 
         # 训练模型
-        model.fit(X_train_scaled, y_train,
-                  eval_set=[(X_val_scaled, y_val)],
-                  verbose=0)
+        if model_type == 'xgboost':
+            model.fit(X_train_scaled, y_train,
+                      eval_set=[(X_val_scaled, y_val)],
+                      verbose=0)
+        else:
+            # RandomForest和LinearRegression不支持eval_set参数
+            model.fit(X_train_scaled, y_train)
 
-        # 记录特征重要性
-        fold_importance = pd.DataFrame({
-            'feature': X.columns,
-            f'fold_{fold}': model.feature_importances_
-        })
-        feature_importances = pd.concat([feature_importances, fold_importance.set_index('feature')], axis=1)
+        # 记录特征重要性（仅XGBoost和RandomForest支持）
+        if has_importances:
+            fold_importance = pd.DataFrame({
+                'feature': X.columns,
+                f'fold_{fold}': model.feature_importances_
+            })
+            feature_importances = pd.concat([feature_importances, fold_importance.set_index('feature')], axis=1)
 
         # 收集预测结果
         pred = model.predict(X_val_scaled)
@@ -186,9 +216,14 @@ def train_and_evaluate(X, y):
             'MAE': mean_absolute_error(y_val, pred)
         })
 
-    # 处理特征重要性
-    feature_importances['avg_importance'] = feature_importances.mean(axis=1)
-    feature_importances = feature_importances.sort_values('avg_importance', ascending=False)
+    # 处理特征重要性（仅XGBoost和RandomForest支持）
+    if has_importances:
+        feature_importances['avg_importance'] = feature_importances.mean(axis=1)
+        feature_importances = feature_importances.sort_values('avg_importance', ascending=False)
+    else:
+        # 对于线性回归，创建一个空的重要性DataFrame
+        feature_importances = pd.DataFrame(index=X.columns)
+        feature_importances['avg_importance'] = 0.0
 
     return pd.DataFrame(fold_results), feature_importances, all_predictions
 
@@ -228,7 +263,7 @@ def plot_predictions(predictions, target, site_dir=None):
 
 
 
-def process_site_data(df, site_name):
+def process_site_data(df, site_name, model_type='xgboost'):
     """处理单个站点的数据"""
     # 过滤出当前站点的数据
     if site_name == 'default':
@@ -275,7 +310,7 @@ def process_site_data(df, site_name):
             print(f"特征数量: {X.shape[1]}, 样本数量: {X.shape[0]}")
 
             # 训练评估
-            metrics, importances, predictions = train_and_evaluate(X, y)
+            metrics, importances, predictions = train_and_evaluate(X, y, model_type)
 
             # 保存预测结果
             predictions.to_csv(os.path.join(site_predictions_dir, f'{target}_predictions.csv'), index=False)
@@ -322,7 +357,7 @@ def process_site_data(df, site_name):
     return final_metrics
 
 
-def main(data_path):
+def main(data_path, model_type='xgboost'):
     """主流程 - 按站点分别处理"""
     # 检查文件是否存在
     if not os.path.exists(data_path):
@@ -352,11 +387,11 @@ def main(data_path):
         for site in sites:
             print(f"\n{'#' * 50}\n开始处理站点: {site}\n{'#' * 50}")
             site_data = df[df['SITENAME'] == site].copy()
-            results[site] = process_site_data(site_data, site)
+            results[site] = process_site_data(site_data, site, model_type)
     else:
         # 处理无站点信息的数据
         print(f"\n{'#' * 50}\n开始处理默认站点\n{'#' * 50}")
-        results['default'] = process_site_data(df, 'default')
+        results['default'] = process_site_data(df, 'default', model_type)
     
     # 保存汇总结果
     summary = {}
@@ -379,12 +414,30 @@ def main(data_path):
 
 
 if __name__ == "__main__":
+    # 默认参数
     excel_path = '/Volumes/personal_folder/code/csc/数据/2019-2024年19个国控点+上海市小时数据.xlsx'
+    model_type = 'xgboost'  # 默认使用XGBoost模型
+    
+    # 解析命令行参数
+    if len(sys.argv) > 1:
+        excel_path = sys.argv[1]
+    if len(sys.argv) > 2:
+        model_type = sys.argv[2].lower()
+    
+    # 验证模型类型
+    if model_type not in AVAILABLE_MODELS:
+        print(f"错误: 不支持的模型类型 '{model_type}'")
+        print(f"支持的模型: {', '.join(AVAILABLE_MODELS)}")
+        sys.exit(1)
+    
+    print(f"使用模型: {model_type}")
+    
     try:
-        results = main(excel_path)
+        results = main(excel_path, model_type)
         print("\n各站点最终性能指标:")
         for site, metrics in results.items():
             print(f"\n站点: {site}")
             print(pd.DataFrame(metrics).T)
     except Exception as e:
         print(f"程序执行出错: {str(e)}")
+        sys.exit(1)
