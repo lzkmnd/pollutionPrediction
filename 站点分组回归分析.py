@@ -569,6 +569,50 @@ class SiteBasedAnalysisPipeline:
             if cols_to_interpolate:
                 df[cols_to_interpolate] = df[cols_to_interpolate].interpolate(method='linear').fillna(method='bfill').fillna(method='ffill')
             
+            # === 零值清洗协议 (Zero Value Cleaning Protocol) ===
+            # 污染物中除CO和SO2外，零值通常表示测量异常或仪器故障
+            # CO和SO2在低排放条件下可能合法地接近零
+            pollutants_to_clean = ['PM2.5', 'PM10', 'O3', 'NO2']  # 需要清洗零值的污染物
+            pollutants_to_keep = ['CO', 'SO2']  # 保留零值的污染物
+            
+            original_len = len(df)
+            zero_value_report = {}
+            
+            for pollutant in pollutants_to_clean:
+                if pollutant in df.columns:
+                    # 统计零值数量
+                    zero_count = (df[pollutant] == 0).sum()
+                    zero_value_report[pollutant] = zero_count
+                    
+                    if zero_count > 0:
+                        # 将零值替换为NaN，然后通过插值填充
+                        df.loc[df[pollutant] == 0, pollutant] = np.nan
+            
+            # 对清洗后的零值进行插值填充
+            for pollutant in pollutants_to_clean:
+                if pollutant in df.columns:
+                    df[pollutant] = df[pollutant].interpolate(method='linear').fillna(method='bfill').fillna(method='ffill')
+            
+            # 生成零值清洗报告
+            if any(zero_value_report.values()):
+                self.log(f"\n{'='*50}", log_file)
+                self.log(f"零值清洗报告 (Zero Value Cleaning Report)", log_file)
+                self.log(f"{'='*50}", log_file)
+                self.log(f"总数据量: {original_len} 条", log_file)
+                
+                total_cleaned = 0
+                for pollutant, count in zero_value_report.items():
+                    if count > 0:
+                        percentage = count / original_len * 100
+                        self.log(f"  {pollutant}: 移除 {count} 个零值 ({percentage:.2f}%)", log_file)
+                        total_cleaned += count
+                
+                self.log(f"  ─────────────────────────────", log_file)
+                self.log(f"  总计清洗: {total_cleaned} 个零值", log_file)
+                self.log(f"  保留零值: CO, SO₂ (可能为合法低浓度值)", log_file)
+                self.log(f"  清洗方法: 零值→NaN→线性插值填充", log_file)
+                self.log(f"{'='*50}\n", log_file)
+            
             # === 特征构造（使用有物理意义的衍生特征）===
             
             # 高优先级特征
