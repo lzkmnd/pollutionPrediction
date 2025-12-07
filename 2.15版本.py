@@ -11,6 +11,15 @@ import logging
 from scipy import stats
 import os
 import sys
+try:
+    import tensorflow as tf
+    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import LSTM, Dense, Dropout
+except ImportError:
+    print("警告: 无法导入TensorFlow，LSTM模型将不可用。请运行 'pip install tensorflow' 来安装。")
+    TF_AVAILABLE = False
+else:
+    TF_AVAILABLE = True
 
 # 配置日志
 logging.basicConfig(
@@ -29,7 +38,7 @@ N_LAGS = 24
 ROLL_WINDOW = 12
 WINDDIR_FEATURES = ['winddir_sin1', 'winddir_cos1', 'winddir_sin2', 'winddir_cos2']
 # 支持的模型类型
-AVAILABLE_MODELS = ['xgboost', 'random_forest', 'linear_regression']
+AVAILABLE_MODELS = ['xgboost', 'random_forest', 'linear_regression', 'lstm']
 
 # 创建输出目录
 os.makedirs(PREDICTIONS_DIR, exist_ok=True)
@@ -135,6 +144,18 @@ def create_features(df, target_col):
     return features[selected_features]
 
 
+def create_lstm_model(input_shape):
+    """创建LSTM模型"""
+    model = Sequential()
+    model.add(LSTM(64, return_sequences=True, input_shape=input_shape))
+    model.add(Dropout(0.2))
+    model.add(LSTM(32))
+    model.add(Dropout(0.2))
+    model.add(Dense(16, activation='relu'))
+    model.add(Dense(1))  # 回归输出
+    model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+    return model
+
 def get_model(model_type='xgboost'):
     """根据模型类型返回相应的模型实例"""
     if model_type == 'xgboost':
@@ -158,16 +179,21 @@ def get_model(model_type='xgboost'):
         )
     elif model_type == 'linear_regression':
         return LinearRegression()
+    elif model_type == 'lstm':
+        if not TF_AVAILABLE:
+            raise ImportError("TensorFlow未安装，无法使用LSTM模型。请安装TensorFlow后重试。")
+        # LSTM模型需要在训练时根据输入形状创建
+        return 'lstm_model_placeholder'
     else:
         raise ValueError(f"不支持的模型类型: {model_type}。支持的模型: {AVAILABLE_MODELS}")
 
 def train_and_evaluate(X, y, model_type='xgboost'):
     """改进的模型训练流程（支持多种模型选择）"""
     tscv = TimeSeriesSplit(n_splits=3)
-    model = get_model(model_type)
     
     # 特殊处理：线性回归没有特征重要性
     has_importances = model_type in ['xgboost', 'random_forest']
+    is_lstm = model_type == 'lstm'
 
     fold_results = []
     feature_importances = pd.DataFrame()
@@ -183,13 +209,83 @@ def train_and_evaluate(X, y, model_type='xgboost'):
         X_val_scaled = scaler.transform(X_val)
 
         # 训练模型
-        if model_type == 'xgboost':
-            model.fit(X_train_scaled, y_train,
-                      eval_set=[(X_val_scaled, y_val)],
-                      verbose=0)
+        if is_lstm:
+            # LSTM需要3D输入形状 [samples, timesteps, features]
+            # 为了简化，我们将特征重塑为24步的序列
+            sequence_length = 24
+            
+            # 准备LSTM数据
+            def create_sequences(X, y, seq_length):
+                X_seq, y_seq = [], []
+                for i in range(len(X) - seq_length):
+                    X_seq.append(X[i:i+seq_length])
+                    y_seq.append(y[i+seq_length])
+                return np.array(X_seq), np.array(y_seq)
+            
+            # 创建序列数据
+            X_train_seq, y_train_seq = create_sequences(X_train_scaled, y_train.values, sequence_length)
+            X_val_seq, y_val_seq = create_sequences(X_val_scaled, y_val.values, sequence_length)
+            
+            # 创建并训练LSTM模型
+            input_shape = (X_train_seq.shape[1], X_train_seq.shape[2])
+            model = create_lstm_model(input_shape)
+            
+            # 训练模型
+            history = model.fit(
+                X_train_seq, y_train_seq,
+                validation_data=(X_val_seq, y_val_seq),
+                epochs=50,
+                batch_size=64,
+                verbose=0,
+                callbacks=[tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10)]
+            )
+            
+            # 预测
+            pred = model.predict(X_val_seq).flatten()
+            # 对齐预测结果和原始索引
+            val_indices = np.arange(sequence_length, len(X_val_scaled))
+            
+            # 确保预测值和索引的长度匹配
+            min_length = min(len(pred), len(val_indices))
+            pred = pred[:min_length]
+            val_indices = val_indices[:min_length]
+            
+            # 确保y_val的长度足够，避免索引越界
+            actual_val = y_val.iloc[min(val_indices[0], len(y_val)-1):min(val_indices[-1]+1, len(y_val))]
+            
+            # 再次确保长度完全匹配
+            final_length = min(len(pred), len(actual_val))
+            pred = pred[:final_length]
+            actual_val = actual_val.iloc[:final_length]
+            
+            # 创建预测结果DataFrame
+            fold_pred = pd.DataFrame({
+                'TIME': X_val.index[val_indices],
+                'Actual': actual_val,
+                'Predicted': pred,
+                'Fold': f'fold_{fold + 1}'
+            })
         else:
-            # RandomForest和LinearRegression不支持eval_set参数
-            model.fit(X_train_scaled, y_train)
+            # 获取模型
+            model = get_model(model_type)
+            
+            # 训练模型
+            if model_type == 'xgboost':
+                model.fit(X_train_scaled, y_train,
+                          eval_set=[(X_val_scaled, y_val)],
+                          verbose=0)
+            else:
+                # RandomForest和LinearRegression不支持eval_set参数
+                model.fit(X_train_scaled, y_train)
+            
+            # 收集预测结果
+            pred = model.predict(X_val_scaled)
+            fold_pred = pd.DataFrame({
+                'TIME': X_val.index,
+                'Actual': y_val,
+                'Predicted': pred,
+                'Fold': f'fold_{fold + 1}'
+            })
 
         # 记录特征重要性（仅XGBoost和RandomForest支持）
         if has_importances:
@@ -199,22 +295,22 @@ def train_and_evaluate(X, y, model_type='xgboost'):
             })
             feature_importances = pd.concat([feature_importances, fold_importance.set_index('feature')], axis=1)
 
-        # 收集预测结果
-        pred = model.predict(X_val_scaled)
-        fold_pred = pd.DataFrame({
-            'TIME': X_val.index,
-            'Actual': y_val,
-            'Predicted': pred,
-            'Fold': f'fold_{fold + 1}'
-        })
+        # 添加预测结果到总结果
         all_predictions = pd.concat([all_predictions, fold_pred])
 
-        # 评估指标
-        fold_results.append({
-            'R2': r2_score(y_val, pred),
-            'RMSE': np.sqrt(mean_squared_error(y_val, pred)),
-            'MAE': mean_absolute_error(y_val, pred)
-        })
+        # 评估指标 - 对于LSTM使用调整后的actual_val
+        if is_lstm:
+            fold_results.append({
+                'R2': r2_score(actual_val, pred),
+                'RMSE': np.sqrt(mean_squared_error(actual_val, pred)),
+                'MAE': mean_absolute_error(actual_val, pred)
+            })
+        else:
+            fold_results.append({
+                'R2': r2_score(y_val, pred),
+                'RMSE': np.sqrt(mean_squared_error(y_val, pred)),
+                'MAE': mean_absolute_error(y_val, pred)
+            })
 
     # 处理特征重要性（仅XGBoost和RandomForest支持）
     if has_importances:
@@ -414,15 +510,21 @@ def main(data_path, model_type='xgboost'):
 
 
 if __name__ == "__main__":
-    # 默认参数
-    excel_path = '/Volumes/personal_folder/code/csc/数据/2019-2024年19个国控点+上海市小时数据.xlsx'
+    excel_path = '/Volumes/personal_folder/code/csc/数据/虹口.xlsx'
     model_type = 'xgboost'  # 默认使用XGBoost模型
     
-    # 解析命令行参数
+    # 允许通过命令行参数覆盖默认值
     if len(sys.argv) > 1:
-        excel_path = sys.argv[1]
-    if len(sys.argv) > 2:
-        model_type = sys.argv[2].lower()
+        # 简单的参数解析，支持位置参数或--model参数
+        i = 1
+        while i < len(sys.argv):
+            if sys.argv[i] == '--model' and i + 1 < len(sys.argv):
+                model_type = sys.argv[i + 1].lower()
+                i += 2
+            else:
+                # 第一个非--model参数作为excel路径
+                excel_path = sys.argv[i]
+                i += 1
     
     # 验证模型类型
     if model_type not in AVAILABLE_MODELS:
