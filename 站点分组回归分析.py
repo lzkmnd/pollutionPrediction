@@ -27,7 +27,8 @@ from statsmodels.stats.outliers_influence import variance_inflation_factor
 # 机器学习核心库
 from sklearn.base import clone
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, TimeSeriesSplit
+from scipy import stats  # 用于统计检验和置信区间
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 from sklearn.feature_selection import VarianceThreshold
 from sklearn.linear_model import LinearRegression
@@ -411,10 +412,20 @@ class SiteBasedAnalysisPipeline:
         return paths, os.path.join(paths['logs'], "详细运行日志.txt")
 
     def log(self, msg, log_file):
-        """日志记录"""
+        """日志记录（增强鲁棒性）"""
         print(msg)
-        with open(log_file, 'a', encoding='utf-8') as f:
-            f.write(f"{datetime.now().strftime('%H:%M:%S')} - {msg}\n")
+        if log_file:
+            try:
+                # 确保目录存在
+                log_dir = os.path.dirname(log_file)
+                if not os.path.exists(log_dir):
+                    os.makedirs(log_dir, exist_ok=True)
+                
+                with open(log_file, 'a', encoding='utf-8') as f:
+                    f.write(f"{datetime.now().strftime('%H:%M:%S')} - {msg}\n")
+            except Exception as e:
+                # 如果日志写入失败，只打印到控制台
+                print(f"[日志写入警告: {str(e)}]")
 
     def calculate_iaqi(self, pollutant, concentration):
         """计算单个污染物的IAQI值（基于GB 3095-2012标准）"""
@@ -618,6 +629,14 @@ class SiteBasedAnalysisPipeline:
                 # 裁剪到合理范围 [0, 50] g/m³
                 df['Absolute_Humidity'] = np.clip(absolute_humidity, 0, 50)
             
+            # === 重要：处理衍生特征产生的NaN ===
+            # PM_Ratio可能产生NaN，需要填充
+            derived_features = ['PM_Ratio', 'U_Wind', 'V_Wind', 'Atmospheric_Stability', 'Absolute_Humidity']
+            for feat in derived_features:
+                if feat in df.columns:
+                    # 使用前向填充 + 后向填充 + 0填充
+                    df[feat] = df[feat].fillna(method='ffill').fillna(method='bfill').fillna(0)
+            
             # 季节特征处理
             if '季节' in df.columns:
                 season_map = {'冬': 0, '春': 1, '夏': 2, '秋': 3}
@@ -792,8 +811,11 @@ class SiteBasedAnalysisPipeline:
                     'min_samples_split': Integer(2, 10)
                 }
             try:
-                opt = BayesSearchCV(est, space, n_iter=15, cv=3, n_jobs=-1, random_state=42, verbose=0)
-                idx = np.random.choice(len(X), min(len(X), 300), replace=False)
+                # 使用TimeSeriesSplit以避免数据泄露
+                tscv_opt = TimeSeriesSplit(n_splits=3)
+                opt = BayesSearchCV(est, space, n_iter=15, cv=tscv_opt, n_jobs=-1, random_state=42, verbose=0)
+                # 在样本子集上优化（加速），但保持时间顺序
+                idx = np.arange(min(len(X), 300))  # 取前300个样本，保持顺序
                 opt.fit(X[idx], y[idx].ravel())
                 self.log(f"       [优化成功] {model_name} 最佳参数: {dict(opt.best_params_)}", log_file)
                 return opt.best_estimator_
@@ -867,7 +889,9 @@ class SiteBasedAnalysisPipeline:
                 log_file=None
             )
             
-            kf = KFold(n_splits=5, shuffle=True, random_state=42)
+            # 使用时序分割验证（避免未来信息泄漏）
+            # 对于时间序列数据，使用TimeSeriesSplit更合适
+            tscv = TimeSeriesSplit(n_splits=7)  # 使用7折以获得更准确的性能估计
             models = ['xgboost', 'random_forest', 'linear_regression']
             if TF_AVAILABLE:
                 models.append('lstm')
@@ -888,58 +912,189 @@ class SiteBasedAnalysisPipeline:
                 
                 self.log(f"  > 模型: {m_name:<18} | 策略: {mode_desc} (特征数:{len(feats_curr)})", log_file)
                 
-                # 参数优化
-                base_model = self.optimize_model(X_curr, y, m_name, log_file)
+                # 针对低浓度/偏态分布污染物（SO2, CO, NO2），不再启用对数变换
+                # 因为对数变换对低浓度污染物反而破坏了线性关系
+                use_log_target = False
+                # 如果确实需要对某些污染物使用对数变换，可以在这里单独指定
+                # use_log_target = target in ['某些污染物']
+                
+                # 参数优化 (如果是对数变换模式，传入对数转换后的y)
+                y_for_opt = np.log1p(y) if use_log_target else y
+                base_model = self.optimize_model(X_curr, y_for_opt, m_name, log_file)
                 
                 r2s, rmses, maes = [], [], []  # 添加MAE列表
-                full_pred = np.zeros(len(y))
+                pearson_rs = []  # Pearson相关系数
+                p_values = []    # p值
+                full_pred = np.full(len(y), np.nan)  # 使用NaN初始化，标记未预测的部分
                 
                 last_model_for_shap = None
                 last_X_train_for_shap = None
                 
                 # 交叉验证训练
-                for t_idx, v_idx in kf.split(X_curr):
+                for t_idx, v_idx in tscv.split(X_curr):
                     X_t, X_v = X_curr[t_idx], X_curr[v_idx]
                     y_t, y_v = y[t_idx], y[v_idx]
                     
-                    sc_x, sc_y = StandardScaler(), StandardScaler()
+                    # 特征标准化（所有模型都需要）
+                    sc_x = StandardScaler()
                     X_t_s = sc_x.fit_transform(X_t)
                     X_v_s = sc_x.transform(X_v)
-                    y_t_s = sc_y.fit_transform(y_t).flatten()
                     
-                    if m_name == 'lstm':
+                    # 目标变量处理（对数变换 + 标准化）
+                    if use_log_target:
+                        y_t_proc = np.log1p(y_t)
+                    else:
+                        y_t_proc = y_t
+                    
+                    # 根据模型类型选择是否标准化目标变量
+                    # 学术最佳实践：树模型不标准化目标变量，避免负值风险
+                    if m_name in ['random_forest', 'xgboost']:
+                        # 树模型：直接使用原始/对数变换后的目标值
+                        y_t_train = y_t_proc
+                        model = clone(base_model)
+                        model.fit(X_t_s, y_t_train)
+                        p = model.predict(X_v_s)
+                        # 树模型预测结果已经在原始尺度，无需反标准化
+                        if use_log_target:
+                            p_real = np.expm1(p)
+                        else:
+                            p_real = p
+                        last_model_for_shap = model
+                        last_X_train_for_shap = X_t_s
+                        
+                    elif m_name == 'lstm':
+                        # LSTM：标准化目标变量（神经网络训练需要）
+                        sc_y = StandardScaler()
+                        y_t_s = sc_y.fit_transform(y_t_proc.reshape(-1, 1)).flatten()
                         model = self.build_lstm(X_curr.shape[1])
                         X_t_r = X_t_s.reshape(X_t_s.shape[0], 1, X_t_s.shape[1])
                         X_v_r = X_v_s.reshape(X_v_s.shape[0], 1, X_v_s.shape[1])
                         model.fit(X_t_r, y_t_s, epochs=40, batch_size=32, verbose=0,
                                 callbacks=[EarlyStopping(monitor='loss', patience=5)])
                         p = model.predict(X_v_r, verbose=0).flatten()
-                    else:
+                        # 反标准化
+                        p_inv = sc_y.inverse_transform(p.reshape(-1, 1)).flatten()
+                        if use_log_target:
+                            p_real = np.expm1(p_inv)
+                        else:
+                            p_real = p_inv
+                            
+                    else:  # linear_regression
+                        # 线性模型：标准化目标变量（提高数值稳定性）
+                        sc_y = StandardScaler()
+                        y_t_s = sc_y.fit_transform(y_t_proc.reshape(-1, 1)).flatten()
                         model = clone(base_model)
                         model.fit(X_t_s, y_t_s)
                         p = model.predict(X_v_s)
+                        # 反标准化
+                        p_inv = sc_y.inverse_transform(p.reshape(-1, 1)).flatten()
+                        if use_log_target:
+                            p_real = np.expm1(p_inv)
+                        else:
+                            p_real = p_inv
                         last_model_for_shap = model
                         last_X_train_for_shap = X_t_s
                     
-                    p_real = sc_y.inverse_transform(p.reshape(-1, 1)).flatten()
+                    # 确保所有预测值非负（污染物浓度不能为负）
+                    # 注：树模型通常不会产生负值，但保险起见仍然应用此约束
+                    p_real = np.maximum(p_real, 0)
+                    
                     full_pred[v_idx] = p_real
                     
-                    r2s.append(r2_score(y_v, p_real))
-                    rmses.append(np.sqrt(mean_squared_error(y_v, p_real)))
-                    maes.append(mean_absolute_error(y_v, p_real))  # 添加MAE计算
+                    # 确保y_v和p_real都是1D数组
+                    y_v_flat = y_v.flatten() if hasattr(y_v, 'flatten') else y_v
+                    p_real_flat = p_real.flatten() if hasattr(p_real, 'flatten') else p_real
+                    
+                    # 计算基本指标
+                    r2s.append(r2_score(y_v_flat, p_real_flat))
+                    rmses.append(np.sqrt(mean_squared_error(y_v_flat, p_real_flat)))
+                    maes.append(mean_absolute_error(y_v_flat, p_real_flat))
+                    
+                    # 计算Pearson相关系数和p值（统计显著性）
+                    try:
+                        pearson_r, pearson_p = stats.pearsonr(y_v_flat, p_real_flat)
+                        pearson_rs.append(pearson_r)
+                        p_values.append(pearson_p)
+                    except Exception as e:
+                        # 如果Pearson计算失败，使用NaN
+                        pearson_rs.append(np.nan)
+                        p_values.append(np.nan)
+                        self.log(f"    警告: Pearson计算失败: {str(e)}", log_file)
                 
+                # 计算平均值
                 avg_r2 = np.mean(r2s)
                 avg_rmse = np.mean(rmses)
-                avg_mae = np.mean(maes)  # 计算平均MAE
-                self.log(f"    评估: R2={avg_r2:.4f} | RMSE={avg_rmse:.4f} | MAE={avg_mae:.4f}", log_file)
+                avg_mae = np.mean(maes)
+                avg_pearson = np.mean(pearson_rs)
+                avg_p_value = np.mean(p_values)
+                
+                # 计算95%置信区间（使用t分布）
+                n_folds = len(r2s)
+                r2_std = np.std(r2s, ddof=1)
+                rmse_std = np.std(rmses, ddof=1)
+                mae_std = np.std(maes, ddof=1)
+                
+                # t分布的临界值（双尾，95%置信度）
+                t_critical = stats.t.ppf(0.975, n_folds - 1)
+                
+                r2_ci_margin = t_critical * r2_std / np.sqrt(n_folds)
+                rmse_ci_margin = t_critical * rmse_std / np.sqrt(n_folds)
+                mae_ci_margin = t_critical * mae_std / np.sqrt(n_folds)
+                
+                # 截断置信区间到合理范围
+                r2_ci_lower = avg_r2 - r2_ci_margin  # R²下界不截断（允许负值）
+                r2_ci_upper = min(avg_r2 + r2_ci_margin, 1.0)  # R²上界最大1.0
+                rmse_ci_lower = max(avg_rmse - rmse_ci_margin, 0)  # RMSE下界最大0
+                rmse_ci_upper = avg_rmse + rmse_ci_margin
+                mae_ci_lower = max(avg_mae - mae_ci_margin, 0)  # MAE下界最大0
+                mae_ci_upper = avg_mae + mae_ci_margin
+                
+                # 记录日志（包含截断后的置信区间）
+                self.log(
+                    f"    评估: R²={avg_r2:.4f}±{r2_std:.4f} (95%CI:[{r2_ci_lower:.4f},{r2_ci_upper:.4f}]) | "
+                    f"RMSE={avg_rmse:.4f}±{rmse_std:.4f} | MAE={avg_mae:.4f}±{mae_std:.4f}", 
+                    log_file
+                )
+                
+                # === 诊断日志：详细分析交叉验证结果 ===
+                if r2_std > 0.15 or (avg_r2 + r2_ci_margin) > 1.05:
+                    # 只在有问题时输出详细诊断
+                    self.log(f"    [诊断] 交叉验证详情:", log_file)
+                    for i, r2_val in enumerate(r2s, 1):
+                        self.log(f"      Fold {i}: R²={r2_val:.4f}", log_file)
+                    
+                    # 计算变异系数
+                    cv_coef = (r2_std / avg_r2 * 100) if avg_r2 > 0 else 0
+                    self.log(f"      变异系数: {cv_coef:.1f}%", log_file)
+                    
+                    # CI超限警告
+                    if (avg_r2 + r2_ci_margin) > 1.0:
+                        self.log(f"      ⚠️  CI原始上界={avg_r2+r2_ci_margin:.4f} 超过1.0，已截断到1.0", log_file)
+                    
+                    # 稳定性评估
+                    if r2_std > 0.2:
+                        self.log(f"      ⚠️  标准差过大（>{0.2:.1f}），模型稳定性较差", log_file)
+                    elif cv_coef > 15:
+                        self.log(f"      ⚠️  变异系数>15%，不同fold性能差异较大", log_file)
+                    else:
+                        self.log(f"      ✅ 性能稳定性可接受", log_file)
+                
+                self.log(f"    Pearson r={avg_pearson:.4f}, p={avg_p_value:.2e}", log_file)
                 
                 summary.append({
                     '站点': site_name if site_name else '全局',
                     '目标': target,
                     '模型': m_name,
                     'R2': avg_r2,
+                    'R2_Std': r2_std,
+                    'R2_CI_Lower': r2_ci_lower,
+                    'R2_CI_Upper': r2_ci_upper,
                     'RMSE': avg_rmse,
-                    'MAE': avg_mae,  # 添加MAE
+                    'RMSE_Std': rmse_std,
+                    'MAE': avg_mae,
+                    'MAE_Std': mae_std,
+                    'Pearson_r': avg_pearson,
+                    'P_value': avg_p_value,
                     '特征': ",".join(feats_curr)
                 })
                 
@@ -977,26 +1132,42 @@ class SiteBasedAnalysisPipeline:
         summary_path = os.path.join(paths['data'], "结果汇总.csv")
         summary_df.to_csv(summary_path, index=False, encoding='utf-8-sig')
         
-        # === 新增：生成模型性能总汇总文件 ===
+        # === 新增：生成模型性能总汇总文件（论文级格式） ===
         if summary:
             # 提取关键指标，生成易读的总汇总表
             performance_summary = []
             for item in summary:
-                performance_summary.append({
-                    'Pollutant': item['污染物'],
+                perf_row = {
+                    'Pollutant': item['目标'],
                     'Model': item['模型'],
-                    'R²': item['R²'],
-                    'RMSE': item['RMSE'],
-                    'MAE': item['MAE'],
-                    'Train_Time(s)': item.get('训练时间(秒)', 0)
-                })
+                    'R²': f"{item['R2']:.4f}",
+                    'R²_Std': f"{item['R2_Std']:.4f}",
+                    '95%_CI': f"[{item['R2_CI_Lower']:.4f}, {item['R2_CI_Upper']:.4f}]",
+                    'RMSE': f"{item['RMSE']:.4f}",
+                    'MAE': f"{item['MAE']:.4f}",
+                    'Pearson_r': f"{item['Pearson_r']:.4f}",
+                    'P_value': f"{item['P_value']:.2e}"
+                }
+                performance_summary.append(perf_row)
             
             perf_df = pd.DataFrame(performance_summary)
+            
+            # 按污染物分组，标记每个污染物的最佳模型（R²最高）
+            perf_df['Best'] = ''
+            for pollutant in perf_df['Pollutant'].unique():
+                mask = perf_df['Pollutant'] == pollutant
+                pollutant_df = perf_df[mask]
+                best_idx = pollutant_df['R²'].astype(float).idxmax()
+                perf_df.loc[best_idx, 'Best'] = '✓'  # 勾选标记
+            
             # 按污染物和R²排序
-            perf_df = perf_df.sort_values(['Pollutant', 'R²'], ascending=[True, False])
+            perf_df['R²_float'] = perf_df['R²'].astype(float)
+            perf_df = perf_df.sort_values(['Pollutant', 'R²_float'], ascending=[True, False])
+            perf_df = perf_df.drop(columns=['R²_float'])
+            
             perf_summary_path = os.path.join(paths['data'], "Model_Performance_Summary.csv")
             perf_df.to_csv(perf_summary_path, index=False, encoding='utf-8-sig')
-            self.log(f"\n>>> 模型性能总汇总已保存: Model_Performance_Summary.csv", log_file)
+            self.log(f"\n>>> 模型性能总汇总已保存: Model_Performance_Summary.csv（包含置信区间和统计显著性）", log_file)
         
         self.log(f"\n>>> 分析完成！结果已保存", log_file)
         
@@ -1059,7 +1230,19 @@ class SiteBasedAnalysisPipeline:
         # 计算AQI预测误差
         if '真实AQI' in integrated_df.columns and '预测AQI' in integrated_df.columns:
             integrated_df['AQI预测误差'] = integrated_df['预测AQI'] - integrated_df['真实AQI']
-            integrated_df['AQI预测误差率(%)'] = (integrated_df['AQI预测误差'] / integrated_df['真实AQI'] * 100).round(2)
+            integrated_df['AQI预测误差率(%)'] = (integrated_df['AQI预测误差'] / integrated_df['真实AQI'].replace(0, np.nan)) * 100
+        
+        # === 重要：过滤掉没有预测值的行（TimeSeriesSplit只在验证集上有预测） ===
+        # 检查是否有任何污染物的预测值
+        pollutant_cols = [col for col in integrated_df.columns if col.endswith('_预测值')]
+        if pollutant_cols:
+            # 只保留至少有一个污染物预测值不为NaN的行
+            valid_mask = integrated_df[pollutant_cols].notna().any(axis=1)
+            original_len = len(integrated_df)
+            integrated_df = integrated_df[valid_mask].reset_index(drop=True)
+            filtered_len = original_len - len(integrated_df)
+            if filtered_len > 0:
+                self.log(f"过滤掉 {filtered_len} 行无预测值的数据（TimeSeriesSplit交叉验证模式下，只有验证集有预测值）", log_file)
         
         # 保存整合预测表
         aqi_report_path = os.path.join(paths['data'], "AQI整合预测表.csv")
@@ -1068,15 +1251,29 @@ class SiteBasedAnalysisPipeline:
         
         # 生成AQI预测统计摘要
         if '预测AQI' in integrated_df.columns and '真实AQI' in integrated_df.columns:
-            aqi_mae = mean_absolute_error(integrated_df['真实AQI'], integrated_df['预测AQI'])
-            aqi_rmse = np.sqrt(mean_squared_error(integrated_df['真实AQI'], integrated_df['预测AQI']))
-            aqi_r2 = r2_score(integrated_df['真实AQI'], integrated_df['预测AQI'])
+            # 清理AQI数据：移除NaN值
+            aqi_valid_mask = integrated_df[['真实AQI', '预测AQI']].notna().all(axis=1)
+            aqi_clean_df = integrated_df[aqi_valid_mask]
             
-            # 首要污染物预测准确率
-            primary_accuracy = (integrated_df['首要污染物'] == integrated_df['真实首要污染物']).sum() / len(integrated_df) * 100
+            if len(aqi_clean_df) == 0:
+                self.log("  ⚠️  无有效AQI数据进行评估", log_file)
+                return
             
-            # 等级预测准确率
-            level_accuracy = (integrated_df['空气质量等级'] == integrated_df['真实空气质量等级']).sum() / len(integrated_df) * 100
+            aqi_mae = mean_absolute_error(aqi_clean_df['真实AQI'], aqi_clean_df['预测AQI'])
+            aqi_rmse = np.sqrt(mean_squared_error(aqi_clean_df['真实AQI'], aqi_clean_df['预测AQI']))
+            aqi_r2 = r2_score(aqi_clean_df['真实AQI'], aqi_clean_df['预测AQI'])
+            
+            # 首要污染物预测准确率（基于清理后的数据）
+            if '首要污染物' in aqi_clean_df.columns and '真实首要污染物' in aqi_clean_df.columns:
+                primary_accuracy = (aqi_clean_df['首要污染物'] == aqi_clean_df['真实首要污染物']).sum() / len(aqi_clean_df) * 100
+            else:
+                primary_accuracy = 0
+            
+            # 等级预测准确率（基于清理后的数据）
+            if '空气质量等级' in aqi_clean_df.columns and '真实空气质量等级' in aqi_clean_df.columns:
+                level_accuracy = (aqi_clean_df['空气质量等级'] == aqi_clean_df['真实空气质量等级']).sum() / len(aqi_clean_df) * 100
+            else:
+                level_accuracy = 0
             
             self.log(f"\nAQI预测性能:", log_file)
             self.log(f"  MAE: {aqi_mae:.2f}", log_file)
@@ -1093,7 +1290,7 @@ class SiteBasedAnalysisPipeline:
                 'AQI_R2': [aqi_r2],
                 '首要污染物准确率(%)': [primary_accuracy],
                 '空气质量等级准确率(%)': [level_accuracy],
-                '数据量': [len(integrated_df)]
+                '数据量': [len(aqi_clean_df)]
             }
             aqi_stats_df = pd.DataFrame(aqi_stats)
             aqi_stats_path = os.path.join(paths['data'], "AQI预测统计.csv")
@@ -1136,7 +1333,7 @@ class SiteBasedAnalysisPipeline:
         
         # 注意：AQI图表已简化，只保留时序图
 
-    def run(self, data_path, targets=['PM2.5', 'PM10', 'O3', 'SO2', 'NO2', 'CO'], 
+    def run(self, data_path, targets=['NO2', 'CO', 'SO2', 'PM2.5', 'PM10', 'O3'], 
             enable_physics_purification=False, site_filter=None):
         """
         主执行流程
@@ -1309,18 +1506,32 @@ class SiteBasedAnalysisPipeline:
         plt.close()
         
         
-        # 2. 核密度估计散点图 (KDE Density Scatter Plot) - 用于论文
+        # 2. 核密度估计散点图 (KDE Density Scatter Plot)
         if len(y_true) >= 50:
             try:
                 from scipy.stats import gaussian_kde
                 
+                # 清理数据：移除NaN和inf值
+                valid_mask = np.isfinite(y_true) & np.isfinite(y_pred)
+                if not np.any(valid_mask):
+                    print(f"⚠️  KDE散点图跳过 ({target}_{model}): 无有效数据")
+                    return
+                
+                y_true_clean = y_true[valid_mask]
+                y_pred_clean = y_pred[valid_mask]
+                
+                # 确保有足够的数据点
+                if len(y_true_clean) < 10:
+                    print(f"⚠️  KDE散点图跳过 ({target}_{model}): 有效数据点不足 ({len(y_true_clean)} < 10)")
+                    return
+                
                 # 计算密度
-                xy = np.vstack([y_true, y_pred])
+                xy = np.vstack([y_true_clean, y_pred_clean])
                 z = gaussian_kde(xy)(xy)
                 
                 # 按密度排序，让高密度点显示在上层
                 idx = z.argsort()
-                y_true_sorted, y_pred_sorted, z_sorted = y_true[idx], y_pred[idx], z[idx]
+                y_true_sorted, y_pred_sorted, z_sorted = y_true_clean[idx], y_pred_clean[idx], z[idx]
                 
                 fig, ax = plt.subplots(figsize=(7, 6))
                 
@@ -1330,27 +1541,33 @@ class SiteBasedAnalysisPipeline:
                 cbar = plt.colorbar(scatter, ax=ax, label='Kernel Density')
                 
                 # 绘制1:1线（理想拟合线）
-                vmin = min(y_true.min(), y_pred.min())
-                vmax = max(y_true.max(), y_pred.max())
+                vmin = min(y_true_clean.min(), y_pred_clean.min())
+                vmax = max(y_true_clean.max(), y_pred_clean.max())
                 ax.plot([vmin, vmax], [vmin, vmax], 'k--', lw=1.5, alpha=0.7, label='Ideal fit line')
                 
                 # 绘制拟合线（不显示label）
                 fit_line = slope * np.array([vmin, vmax]) + intercept
                 ax.plot([vmin, vmax], fit_line, 'r-', lw=2, alpha=0.8)
                 
-                # 设置标签和标题（使用统一格式的单位）
-                ax.set_xlabel(f"Observed {formatted_target} ($\\mathrm{{\\mu g/m^3}}$)", fontsize=12)
-                ax.set_ylabel(f"Predicted {formatted_target} ($\\mathrm{{\\mu g/m^3}}$)", fontsize=12)
+                # 确定单位（使用标准论文格式）
+                if target == 'CO':
+                    unit_display = 'mg/m$^3$'
+                else:
+                    unit_display = '$\\mu$g/m$^3$'
+
+                # 设置标签和标题（使用格式化的污染物名称和动态单位）
+                ax.set_xlabel(f"Observed {formatted_target} ({unit_display})", fontsize=12)
+                ax.set_ylabel(f"Predicted {formatted_target} ({unit_display})", fontsize=12)
                 ax.set_title(f"{formatted_target}-{model}", fontsize=14, fontweight='bold')
                 
                 # 添加图例（放在左上角）
                 ax.legend(loc='upper left', fontsize=9, framealpha=0.9)
                 
-                # 添加指标文本（使用统一格式的单位）
+                # 添加指标文本（使用动态单位和格式化的污染物名称）
                 metrics_text = (
                     f'$R^2$ = {r2:.3f}\n'
-                    f'MAE = {mae:.2f} $\\mathrm{{\\mu g/m^3}}$\n'
-                    f'RMSE = {rmse:.2f} $\\mathrm{{\\mu g/m^3}}$'
+                    f'MAE = {mae:.2f} {unit_display}\n'
+                    f'RMSE = {rmse:.2f} {unit_display}'
                 )
                 # 添加指标文本（无边框，紧贴图例下方）
                 ax.text(0.02, 0.91, metrics_text, transform=ax.transAxes,
@@ -1366,9 +1583,11 @@ class SiteBasedAnalysisPipeline:
                 plt.savefig(os.path.join(paths['scatter'], f"{target}_{model}_KDE.png"), dpi=300, bbox_inches='tight')
                 plt.close('all')  # 释放内存
             except Exception as e:
-                # 如果KDE计算失败，跳过
+                # 如果KDE计算失败，输出警告日志
+                print(f"⚠️  KDE散点图生成失败 ({target}_{model}): {str(e)}")
+                import traceback
+                traceback.print_exc()
                 plt.close('all')  # 确保失败时也关闭图表
-                pass
 
     def run_shap(self, model, X, features, target, model_name, paths):
         """
@@ -1392,11 +1611,14 @@ class SiteBasedAnalysisPipeline:
             # 创建SHAP summary plot
             fig, ax = plt.subplots(figsize=(10, 6))
             
+            # 标准化特征名称（用于显示）
+            standardized_features = [self.standardize_feature_name(f) for f in features]
+            
             # 使用summary_plot，限制显示特征数量
             shap.summary_plot(
                 shap_values, 
                 X_sub, 
-                feature_names=features,
+                feature_names=standardized_features,  # 使用标准化后的特征名称
                 max_display=15,  # 只显示Top 15特征
                 show=False,
                 plot_size=(10, 6)
@@ -1422,8 +1644,9 @@ class SiteBasedAnalysisPipeline:
         except Exception as e:
             # 如果SHAP分析失败，记录但不中断流程
             plt.close('all')  # 确保失败时也关闭图表
-            print(f"SHAP analysis failed for {target}-{model_name}: {str(e)}")
-            pass
+            print(f"⚠️  SHAP分析失败 ({target}-{model_name}): {str(e)}")
+            import traceback
+            traceback.print_exc()
     
     def standardize_feature_name(self, feature_name):
         """标准化特征名称（论文规范）"""
