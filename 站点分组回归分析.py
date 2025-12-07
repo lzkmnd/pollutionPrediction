@@ -199,6 +199,146 @@ def format_pollutant_name(name):
 
 class SiteBasedAnalysisPipeline:
     """站点分组分析管道类"""
+    
+    # 特征名称标准化映射表（论文规范）
+    FEATURE_NAME_MAP = {
+        # 污染物（使用LaTeX格式）
+        'PM2.5': 'PM$_{2.5}$',
+        'PM10': 'PM$_{10}$',
+        'SO2': 'SO$_2$',
+        'NO2': 'NO$_2$',
+        'O3': 'O$_3$',
+        'CO': 'CO',
+        
+        # 气象变量（标准缩写）
+        'TEMP': 'Temperature',
+        'R': 'Relative Humidity',
+        'WIND': 'Wind Speed',
+        'WINDDIR': 'Wind Direction',
+        'SD': 'Sunshine Duration',
+        'precipitation': 'Precipitation',
+        'PRES': 'Atmospheric Pressure',
+        
+        # 时间特征
+        'month': 'Month',
+        'season_code': 'Season',
+        
+        # 衍生特征（移除Temperature × Humidity，添加有物理意义的特征）
+        # 注：不再使用 Temp_R_Interaction
+        
+        # 高优先级特征（使用最学术的术语）
+        'U_Wind': 'Zonal Wind',                    # 纬向风（东西向）
+        'V_Wind': 'Meridional Wind',               # 经向风（南北向）
+        'PM_Ratio': 'Fine Mode Fraction',          # 细模态颗粒物比例（最专业术语）
+        'Is_Daytime': 'Daytime',                   # 昼夜标识
+        
+        # 中优先级特征
+        'Is_Weekend': 'Weekend',                   # 工作日/周末
+        'Atmospheric_Stability': 'Atmospheric Stability Index',  # 大气稳定度
+        'Absolute_Humidity': 'Absolute Humidity',  # 绝对湿度
+        'Hour': 'Hour of Day',                     # 小时
+    }
+    
+    # 特征单位映射
+    FEATURE_UNITS = {
+        'PM$_{2.5}$': '$\\mu$g/m$^3$',
+        'PM$_{10}$': '$\\mu$g/m$^3$',
+        'SO$_2$': '$\\mu$g/m$^3$',
+        'NO$_2$': '$\\mu$g/m$^3$',
+        'O$_3$': '$\\mu$g/m$^3$',
+        'CO': 'mg/m$^3$',
+        'Temperature': '°C',
+        'Relative Humidity': '%',
+        'Wind Speed': 'm/s',
+        'Wind Direction': '°',
+        'Sunshine Duration': 'h',
+        'Precipitation': 'mm',
+        'Atmospheric Pressure': 'hPa',
+        'Month': '-',
+        'Season': '-',
+        # 特征单位（更新）
+        'Zonal Wind': 'm/s',
+        'Meridional Wind': 'm/s',
+        'Fine Mode Fraction': '-',
+        'Daytime': '-',
+        'Weekend': '-',
+        'Atmospheric Stability Index': '°C·s/m',
+        'Absolute Humidity': 'g/m$^3$',
+        'Hour of Day': 'h',
+    }
+    
+    # CSV输出专用的特征名称（不使用LaTeX，更专业的术语）
+    CSV_FEATURE_NAME_MAP = {
+        # 污染物（纯文本格式）
+        'PM2.5': 'PM2.5',
+        'PM10': 'PM10',
+        'SO2': 'SO2',
+        'NO2': 'NO2',
+        'O3': 'O3',
+        'CO': 'CO',
+        
+        # 气象变量
+        'TEMP': 'Temperature',
+        'R': 'Relative Humidity',
+        'WIND': 'Wind Speed',
+        'WINDDIR': 'Wind Direction',
+        'SD': 'Sunshine Duration',
+        'precipitation': 'Precipitation',
+        'PRES': 'Atmospheric Pressure',
+        
+        # 时间特征
+        'month': 'Month',
+        'season_code': 'Season',
+        
+        # 衍生特征（高优先级）
+        'U_Wind': 'Zonal Wind',
+        'V_Wind': 'Meridional Wind',
+        'PM_Ratio': 'Fine Mode Fraction',  # 最专业的术语
+        'Is_Daytime': 'Daytime',
+        
+        # 衍生特征（中优先级）
+        'Is_Weekend': 'Weekend',
+        'Atmospheric_Stability': 'Atmospheric Stability Index',
+        'Absolute_Humidity': 'Absolute Humidity',
+        'Hour': 'Hour',
+    }
+    
+    # 特征物理意义描述（用于论文和特征映射文件）
+    FEATURE_DESCRIPTIONS = {
+        # 污染物
+        'PM$_{2.5}$': '细颗粒物（空气动力学直径 ≤ 2.5 μm），主要来源于燃烧过程和二次气溶胶生成',
+        'PM$_{10}$': '可吸入颗粒物（空气动力学直径 ≤ 10 μm），包含细颗粒物和粗颗粒物',
+        'SO$_2$': '二氧化硫，燃煤和工业排放的指示物，可转化为硫酸盐气溶胶',
+        'NO$_2$': '二氧化氮，主要来自机动车尾气排放，参与光化学反应',
+        'O$_3$': '臭氧，由光化学反应生成的二次污染物，高浓度时危害人体健康',
+        'CO': '一氧化碳，不完全燃烧的产物，指示燃烧效率',
+        
+        # 气象变量
+        'Temperature': '气温，影响大气化学反应速率和污染物寿命',
+        'Relative Humidity': '相对湿度，影响颗粒物吸湿增长和二次气溶胶生成',
+        'Wind Speed': '风速，控制污染物扩散和稀释能力',
+        'Wind Direction': '风向，决定污染物传输路径和来源方向',
+        'Sunshine Duration': '日照时数，影响光化学反应速率和臭氧生成',
+        'Precipitation': '降水量，通过湿沉降去除大气污染物',
+        'Atmospheric Pressure': '气压，与天气系统和气团移动相关，影响污染物累积',
+        
+        # 时间特征
+        'Month': '月份（1-12），捕捉季节性变化和污染物排放模式',
+        'Season': '季节编码（0-3: 冬-春-夏-秋），表征季节性排放和气象特征',
+        'Hour of Day': '小时（0-23），表征日变化周期和人为活动规律',
+        'Daytime': '昼夜标识（1=白天, 0=夜晚），表征光化学活性和边界层高度变化',
+        'Weekend': '周末标识（1=周末, 0=工作日），表征人为活动强度的周期性变化',
+        
+        # 衍生特征（高优先级）
+        'Zonal Wind': '纬向风（东西向分量），表征东西方向的污染物输送',
+        'Meridional Wind': '经向风（南北向分量），表征南北方向的污染物输送',
+        'Fine Mode Fraction': '细模态颗粒物比例，指示污染源类型（高值=燃烧源和二次生成，低值=扬尘和粗颗粒）',
+        
+        # 衍生特征（中优先级）
+        'Atmospheric Stability Index': '大气稳定度指数（温度/风速），表征垂直混合能力和污染物扩散条件',
+        'Absolute Humidity': '绝对湿度（Magnus公式计算），影响二次气溶胶形成和颗粒物增长',
+    }
+    
     def __init__(self, output_dir='./分析结果'):
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.data_filename = None  # 保存数据文件名，用于命名输出文件夹
@@ -418,9 +558,65 @@ class SiteBasedAnalysisPipeline:
             if cols_to_interpolate:
                 df[cols_to_interpolate] = df[cols_to_interpolate].interpolate(method='linear').fillna(method='bfill').fillna(method='ffill')
             
-            # === 特征构造 ===
+            # === 特征构造（使用有物理意义的衍生特征）===
+            
+            # 高优先级特征
+            # 1. 风矢量分解（添加静风阈值，避免噪声）
+            if 'WIND' in df.columns and 'WINDDIR' in df.columns:
+                wind_threshold = 0.5  # 最小有效风速 m/s
+                df['U_Wind'] = np.where(
+                    df['WIND'] >= wind_threshold,
+                    -df['WIND'] * np.sin(np.radians(df['WINDDIR'])),
+                    0  # 静风时为0
+                )
+                df['V_Wind'] = np.where(
+                    df['WIND'] >= wind_threshold,
+                    -df['WIND'] * np.cos(np.radians(df['WINDDIR'])),
+                    0  # 静风时为0
+                )
+            
+            # 2. PM比值（改进除零保护，避免扰曲真实比值）
+            if 'PM2.5' in df.columns and 'PM10' in df.columns:
+                # 只在PM10>0.1时计算比值，否则为NaN
+                df['PM_Ratio'] = np.where(
+                    df['PM10'] > 0.1, 
+                    df['PM2.5'] / df['PM10'], 
+                    np.nan
+                )
+                # 裁剪到合理范围 [0, 1]（PM2.5理论上不应超过PM10）
+                df['PM_Ratio'] = df['PM_Ratio'].clip(0, 1)
+            
+            # 3. 昼夜标识（光化学反应、边界层高度的日变化）
+            if 'TIME' in df.columns:
+                df['Hour'] = df['TIME'].dt.hour
+                df['Is_Daytime'] = ((df['Hour'] >= 6) & (df['Hour'] < 18)).astype(int)
+                
+                # 4. 工作日/周末（人为活动的周期变化）
+                df['Is_Weekend'] = (df['TIME'].dt.dayofweek >= 5).astype(int)
+            
+            # 中优先级特征
+            # 5. 大气稳定度（使用绝对温度避免负值，并裁剪异常值）
+            if 'TEMP' in df.columns and 'WIND' in df.columns:
+                # 使用开尔文温度（绝对温度）避免负值带来的物理意义不明确
+                stability = (df['TEMP'] + 273.15) / (df['WIND'] + 0.1)
+                # 裁剪到合理范围 [0, 500] K·s/m
+                df['Atmospheric_Stability'] = np.clip(stability, 0, 500)
+            
+            
+            # 6. 绝对湿度（添加范围验证，使用Magnus公式）
             if 'TEMP' in df.columns and 'R' in df.columns:
-                df['Temp_R_Interaction'] = df['TEMP'] * df['R']
+                # 限制输入范围，防止极端值导致计算错误
+                temp_valid = df['TEMP'].clip(-50, 50)  # 温度范围：-50°C 到 50°C
+                r_valid = df['R'].clip(0, 100)  # 相对湿度：0% 到 100%
+                
+                # Magnus公式计算饱和水气压
+                saturation_vapor = 6.112 * np.exp(17.67 * temp_valid / (temp_valid + 243.5))
+                
+                # 计算绝对湿度
+                absolute_humidity = (r_valid / 100) * saturation_vapor * 2.1674 / (temp_valid + 273.15)
+                
+                # 裁剪到合理范围 [0, 50] g/m³
+                df['Absolute_Humidity'] = np.clip(absolute_humidity, 0, 50)
             
             # 季节特征处理
             if '季节' in df.columns:
@@ -780,6 +976,28 @@ class SiteBasedAnalysisPipeline:
         summary_df = pd.DataFrame(summary)
         summary_path = os.path.join(paths['data'], "结果汇总.csv")
         summary_df.to_csv(summary_path, index=False, encoding='utf-8-sig')
+        
+        # === 新增：生成模型性能总汇总文件 ===
+        if summary:
+            # 提取关键指标，生成易读的总汇总表
+            performance_summary = []
+            for item in summary:
+                performance_summary.append({
+                    'Pollutant': item['污染物'],
+                    'Model': item['模型'],
+                    'R²': item['R²'],
+                    'RMSE': item['RMSE'],
+                    'MAE': item['MAE'],
+                    'Train_Time(s)': item.get('训练时间(秒)', 0)
+                })
+            
+            perf_df = pd.DataFrame(performance_summary)
+            # 按污染物和R²排序
+            perf_df = perf_df.sort_values(['Pollutant', 'R²'], ascending=[True, False])
+            perf_summary_path = os.path.join(paths['data'], "Model_Performance_Summary.csv")
+            perf_df.to_csv(perf_summary_path, index=False, encoding='utf-8-sig')
+            self.log(f"\n>>> 模型性能总汇总已保存: Model_Performance_Summary.csv", log_file)
+        
         self.log(f"\n>>> 分析完成！结果已保存", log_file)
         
         return summary
@@ -922,10 +1140,63 @@ class SiteBasedAnalysisPipeline:
             enable_physics_purification=False, site_filter=None):
         """
         主执行流程
-        data_path: 数据文件路径
+        data_path: 数据文件路径或文件夹路径
         targets: 预测目标列表
         enable_physics_purification: 是否启用物理净化
         site_filter: 指定站点名称（仅分析该站点），None表示分析所有站点
+        """
+        # 检查是文件还是文件夹
+        if os.path.isdir(data_path):
+            # 是文件夹，批量处理
+            print(f"\n检测到文件夹: {data_path}")
+            print(f"正在扫描数据文件...\n")
+            
+            # 扫描所有支持的数据文件
+            data_files = []
+            for file in os.listdir(data_path):
+                if file.endswith(('.csv', '.xlsx', '.xls')) and not file.startswith('~'):  # 排除临时文件
+                    data_files.append(os.path.join(data_path, file))
+            
+            if not data_files:
+                print(f"错误: 文件夹 '{data_path}' 中没有找到数据文件 (.csv/.xlsx)")
+                return
+            
+            # 按文件名排序
+            data_files.sort()
+            print(f"找到 {len(data_files)} 个数据文件:")
+            for i, file in enumerate(data_files, 1):
+                print(f"  {i}. {os.path.basename(file)}")
+            print()
+            
+            # 依次处理每个文件
+            for i, file_path in enumerate(data_files, 1):
+                print(f"\n{'='*70}")
+                print(f"正在处理文件 {i}/{len(data_files)}: {os.path.basename(file_path)}")
+                print(f"{'='*70}\n")
+                
+                try:
+                    # 为每个文件调用单文件处理逻辑
+                    self._process_single_file(file_path, targets, enable_physics_purification, site_filter)
+                except Exception as e:
+                    print(f"\n错误: 处理文件 {os.path.basename(file_path)} 失败: {str(e)}")
+                    print(f"继续处理下一个文件...\n")
+                    continue
+                
+                # 每个文件处理后释放内存
+                gc.collect()
+            
+            print(f"\n{'='*70}")
+            print(f"批量处理完成！共处理 {len(data_files)} 个文件")
+            print(f"结果保存在: {self.root_dir}")
+            print(f"{'='*70}\n")
+            
+        else:
+            # 是单个文件，直接处理
+            self._process_single_file(data_path, targets, enable_physics_purification, site_filter)
+    
+    def _process_single_file(self, data_path, targets, enable_physics_purification, site_filter):
+        """
+        处理单个数据文件
         """
         # 保存数据文件名（用于输出文件夹命名）
         self.data_filename = os.path.basename(data_path)
@@ -1153,19 +1424,63 @@ class SiteBasedAnalysisPipeline:
             plt.close('all')  # 确保失败时也关闭图表
             print(f"SHAP analysis failed for {target}-{model_name}: {str(e)}")
             pass
-
+    
+    def standardize_feature_name(self, feature_name):
+        """标准化特征名称（论文规范）"""
+        # 去除空格
+        feature_name = feature_name.strip()
+        # 查找映射
+        return self.FEATURE_NAME_MAP.get(feature_name, feature_name)
+    
     def calc_importance(self, model, features, target, model_name, paths):
-        """计算特征权重"""
+        """计算特征权重（标准化版）"""
         imp = None
         if hasattr(model, 'feature_importances_'):
             imp = model.feature_importances_
         elif hasattr(model, 'coef_'):
             imp = np.abs(model.coef_)
+        
         if imp is not None:
-            df = pd.DataFrame({'特征': features, '重要性': imp})
-            df['占比(%)'] = (df['重要性'] / df['重要性'].sum() * 100).round(2)
-            df.sort_values('占比(%)', ascending=False).to_csv(
-                os.path.join(paths['data'], f"{target}_{model_name}_特征权重.csv"),
+            # 创建特征重要性DataFrame
+            df = pd.DataFrame({
+                'Original_Name': features,  # 原始名称
+                'Importance': imp
+            })
+            
+            # 标准化特征名称（用于图表）
+            df['Feature_Display'] = df['Original_Name'].apply(self.standardize_feature_name)
+            
+            # CSV专用名称（不使用LaTeX）
+            df['Feature_CSV'] = df['Original_Name'].apply(
+                lambda x: self.CSV_FEATURE_NAME_MAP.get(x.strip(), x)
+            )
+            
+            # 添加单位（基于显示名称）
+            df['Unit'] = df['Feature_Display'].apply(lambda x: self.FEATURE_UNITS.get(x, '-'))
+            
+            # 计算占比
+            df['Contribution (%)'] = (df['Importance'] / df['Importance'].sum() * 100).round(2)
+            
+            # 按重要性排序
+            df = df.sort_values('Contribution (%)', ascending=False)
+            
+            # 保存标准化的特征权重（用于CSV，不含LaTeX）
+            output_df = df[['Feature_CSV', 'Unit', 'Importance', 'Contribution (%)']].copy()
+            output_df.columns = ['Feature', 'Unit', 'Importance', 'Contribution (%)']
+            output_df.to_csv(
+                os.path.join(paths['data'], f"{target}_{model_name}_Feature_Importance.csv"),
+                index=False, encoding='utf-8-sig'
+            )
+            
+            # 2. 保存特征详细说明文件（包含映射+物理意义，合并为一个文件）
+            detail_df = df[['Original_Name', 'Feature_CSV', 'Unit']].copy()
+            # 添加描述列（基于显示名称）
+            detail_df['Physical_Meaning'] = df['Feature_Display'].apply(
+                lambda x: self.FEATURE_DESCRIPTIONS.get(x, '原始数据列')
+            )
+            detail_df.columns = ['Original Column', 'Feature Name', 'Unit', 'Physical Meaning']
+            detail_df.to_csv(
+                os.path.join(paths['data'], f"{target}_{model_name}_Feature_Details.csv"),
                 index=False, encoding='utf-8-sig'
             )
 
