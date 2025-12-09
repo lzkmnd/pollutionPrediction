@@ -8,6 +8,7 @@
 3. [参数控制] 支持通过参数指定分析特定站点
 4. [独立输出] 各站点结果保存在独立文件夹，避免交叉污染
 5. [完整继承] 保持原有分析逻辑的完整性和准确性
+6. [数据清洗] 针对特定污染物进行零值清洗（保留CO/SO2）
 """
 import numpy as np
 import pandas as pd
@@ -76,7 +77,7 @@ def configure_fonts():
     import matplotlib
     import matplotlib.font_manager as fm
     import os
-    
+
     # 0. 尝试清除缓存并强制重建
     try:
         cache_dir = matplotlib.get_cachedir()
@@ -85,7 +86,7 @@ def configure_fonts():
             json_path = os.path.join(cache_dir, cache_file)
             if os.path.exists(json_path):
                 os.remove(json_path)
-        
+
         import matplotlib.font_manager
         matplotlib.font_manager._load_fontmanager(try_read_cache=False)
     except:
@@ -97,9 +98,9 @@ def configure_fonts():
         '/Library/Fonts/Arial Unicode.ttf',
         '/System/Library/Fonts/Supplemental/Arial Unicode.ttf',
     ]
-    
+
     loaded_fonts = []
-    
+
     # 1. 加载中文字体文件
     for path in font_candidates:
         if os.path.exists(path):
@@ -111,7 +112,7 @@ def configure_fonts():
                     loaded_fonts.append(font_name)
             except:
                 pass
-    
+
     # 2. 设置字体参数
     base_fonts = []
     if loaded_fonts:
@@ -119,12 +120,12 @@ def configure_fonts():
     base_fonts.append('Times New Roman')
     fallback_fonts = ['Songti SC', 'Arial Unicode MS', 'SimSun', 'PingFang SC', 'Heiti TC']
     base_fonts.extend(fallback_fonts)
-    
+
     plt.rcParams['font.sans-serif'] = base_fonts
     plt.rcParams['font.serif'] = base_fonts
     plt.rcParams['font.family'] = 'sans-serif'
     plt.rcParams['axes.unicode_minus'] = False
-    
+
     return base_fonts[0] if base_fonts else None
 
 # 配置字体并获取首选字体
@@ -143,25 +144,25 @@ def configure_plot_style():
     plt.rcParams['xtick.labelsize'] = 10    # x轴刻度
     plt.rcParams['ytick.labelsize'] = 10    # y轴刻度
     plt.rcParams['legend.fontsize'] = 9     # 图例
-    
+
     # 线宽统一
     plt.rcParams['lines.linewidth'] = 1.5   # 默认线宽
     plt.rcParams['axes.linewidth'] = 1.0    # 坐标轴线宽
     plt.rcParams['grid.linewidth'] = 0.5    # 网格线宽
-    
+
     # 网格样式
     plt.rcParams['grid.alpha'] = 0.3        # 网格透明度
     plt.rcParams['grid.linestyle'] = '--'   # 网格线型
-    
+
     # 图表边距
     plt.rcParams['figure.autolayout'] = False
     plt.rcParams['figure.constrained_layout.use'] = False
-    
+
     # 高质量输出
     plt.rcParams['savefig.dpi'] = 300
     plt.rcParams['savefig.bbox'] = 'tight'
     plt.rcParams['savefig.pad_inches'] = 0.1
-    
+
     # 颜色循环（论文友好配色）
     # 使用ColorBrewer配色方案
     plt.rcParams['axes.prop_cycle'] = plt.cycler(color=[
@@ -190,17 +191,17 @@ def format_pollutant_name(name):
         'O3': 'O$_3$',
         'CO': 'CO',  # CO保持不变
     }
-    
+
     # 替换字符串中的污染物标识
     result = name
     for old, new in replacements.items():
         result = result.replace(old, new)
-    
+
     return result
 
 class SiteBasedAnalysisPipeline:
     """站点分组分析管道类"""
-    
+
     # 特征名称标准化映射表（论文规范）
     FEATURE_NAME_MAP = {
         # 污染物（使用LaTeX格式）
@@ -210,7 +211,7 @@ class SiteBasedAnalysisPipeline:
         'NO2': 'NO$_2$',
         'O3': 'O$_3$',
         'CO': 'CO',
-        
+
         # 气象变量（标准缩写）
         'TEMP': 'Temperature',
         'R': 'Relative Humidity',
@@ -219,27 +220,27 @@ class SiteBasedAnalysisPipeline:
         'SD': 'Sunshine Duration',
         'precipitation': 'Precipitation',
         'PRES': 'Atmospheric Pressure',
-        
+
         # 时间特征
         'month': 'Month',
         'season_code': 'Season',
-        
+
         # 衍生特征（移除Temperature × Humidity，添加有物理意义的特征）
         # 注：不再使用 Temp_R_Interaction
-        
+
         # 高优先级特征（使用最学术的术语）
         'U_Wind': 'Zonal Wind',                    # 纬向风（东西向）
         'V_Wind': 'Meridional Wind',               # 经向风（南北向）
         'PM_Ratio': 'Fine Mode Fraction',          # 细模态颗粒物比例（最专业术语）
         'Is_Daytime': 'Daytime',                   # 昼夜标识
-        
+
         # 中优先级特征
         'Is_Weekend': 'Weekend',                   # 工作日/周末
         'Atmospheric_Stability': 'Atmospheric Stability Index',  # 大气稳定度
         'Absolute_Humidity': 'Absolute Humidity',  # 绝对湿度
         'Hour': 'Hour of Day',                     # 小时
     }
-    
+
     # 特征单位映射
     FEATURE_UNITS = {
         'PM$_{2.5}$': '$\\mu$g/m$^3$',
@@ -267,7 +268,7 @@ class SiteBasedAnalysisPipeline:
         'Absolute Humidity': 'g/m$^3$',
         'Hour of Day': 'h',
     }
-    
+
     # CSV输出专用的特征名称（不使用LaTeX，更专业的术语）
     CSV_FEATURE_NAME_MAP = {
         # 污染物（纯文本格式）
@@ -277,7 +278,7 @@ class SiteBasedAnalysisPipeline:
         'NO2': 'NO2',
         'O3': 'O3',
         'CO': 'CO',
-        
+
         # 气象变量
         'TEMP': 'Temperature',
         'R': 'Relative Humidity',
@@ -286,24 +287,24 @@ class SiteBasedAnalysisPipeline:
         'SD': 'Sunshine Duration',
         'precipitation': 'Precipitation',
         'PRES': 'Atmospheric Pressure',
-        
+
         # 时间特征
         'month': 'Month',
         'season_code': 'Season',
-        
+
         # 衍生特征（高优先级）
         'U_Wind': 'Zonal Wind',
         'V_Wind': 'Meridional Wind',
         'PM_Ratio': 'Fine Mode Fraction',  # 最专业的术语
         'Is_Daytime': 'Daytime',
-        
+
         # 衍生特征（中优先级）
         'Is_Weekend': 'Weekend',
         'Atmospheric_Stability': 'Atmospheric Stability Index',
         'Absolute_Humidity': 'Absolute Humidity',
         'Hour': 'Hour',
     }
-    
+
     # 特征物理意义描述（用于论文和特征映射文件）
     FEATURE_DESCRIPTIONS = {
         # 污染物
@@ -313,7 +314,7 @@ class SiteBasedAnalysisPipeline:
         'NO$_2$': '二氧化氮，主要来自机动车尾气排放，参与光化学反应',
         'O$_3$': '臭氧，由光化学反应生成的二次污染物，高浓度时危害人体健康',
         'CO': '一氧化碳，不完全燃烧的产物，指示燃烧效率',
-        
+
         # 气象变量
         'Temperature': '气温，影响大气化学反应速率和污染物寿命',
         'Relative Humidity': '相对湿度，影响颗粒物吸湿增长和二次气溶胶生成',
@@ -322,28 +323,28 @@ class SiteBasedAnalysisPipeline:
         'Sunshine Duration': '日照时数，影响光化学反应速率和臭氧生成',
         'Precipitation': '降水量，通过湿沉降去除大气污染物',
         'Atmospheric Pressure': '气压，与天气系统和气团移动相关，影响污染物累积',
-        
+
         # 时间特征
         'Month': '月份（1-12），捕捉季节性变化和污染物排放模式',
         'Season': '季节编码（0-3: 冬-春-夏-秋），表征季节性排放和气象特征',
         'Hour of Day': '小时（0-23），表征日变化周期和人为活动规律',
         'Daytime': '昼夜标识（1=白天, 0=夜晚），表征光化学活性和边界层高度变化',
         'Weekend': '周末标识（1=周末, 0=工作日），表征人为活动强度的周期性变化',
-        
+
         # 衍生特征（高优先级）
         'Zonal Wind': '纬向风（东西向分量），表征东西方向的污染物输送',
         'Meridional Wind': '经向风（南北向分量），表征南北方向的污染物输送',
         'Fine Mode Fraction': '细模态颗粒物比例，指示污染源类型（高值=燃烧源和二次生成，低值=扬尘和粗颗粒）',
-        
+
         # 衍生特征（中优先级）
         'Atmospheric Stability Index': '大气稳定度指数（温度/风速），表征垂直混合能力和污染物扩散条件',
         'Absolute Humidity': '绝对湿度（Magnus公式计算），影响二次气溶胶形成和颗粒物增长',
     }
-    
+
     def __init__(self, output_dir='./分析结果'):
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.data_filename = None  # 保存数据文件名，用于命名输出文件夹
-        
+
         # 处理路径问题 - 确保使用有效的目录
         try:
             # 首先尝试获取当前工作目录
@@ -351,7 +352,7 @@ class SiteBasedAnalysisPipeline:
         except:
             # 如果获取失败，使用脚本所在目录
             current_dir = os.path.dirname(os.path.abspath(__file__))
-        
+
         # 处理输出目录路径
         if output_dir == './分析结果':
             # 使用默认路径，确保在有效目录下
@@ -359,10 +360,10 @@ class SiteBasedAnalysisPipeline:
         elif not os.path.isabs(output_dir):
             # 如果是相对路径，转换为绝对路径
             output_dir = os.path.join(current_dir, output_dir)
-        
+
         # 直接使用固定文件夹名，每次运行覆盖
         self.root_dir = os.path.join(output_dir, "站点分析")
-        
+
         # 确保父目录存在
         parent_dir = os.path.dirname(self.root_dir)
         if parent_dir and not os.path.exists(parent_dir):
@@ -373,7 +374,7 @@ class SiteBasedAnalysisPipeline:
                 # 回退到脚本所在目录
                 output_dir = os.path.join(current_dir, '分析结果')
                 self.root_dir = os.path.join(output_dir, f"站点分析_{self.timestamp}")
-        
+
         try:
             os.makedirs(self.root_dir, exist_ok=True)
             print(f">>> 结果将保存至: {self.root_dir}")
@@ -398,7 +399,7 @@ class SiteBasedAnalysisPipeline:
                 base_dir = os.path.join(self.root_dir, base_name)
             else:
                 base_dir = os.path.join(self.root_dir, "全局分析")
-        
+
         paths = {
             'scatter': os.path.join(base_dir, "1_散点图"),
             'series': os.path.join(base_dir, "2_时序对比图"),
@@ -408,7 +409,7 @@ class SiteBasedAnalysisPipeline:
         }
         for p in paths.values():
             os.makedirs(p, exist_ok=True)
-        
+
         return paths, os.path.join(paths['logs'], "详细运行日志.txt")
 
     def log(self, msg, log_file):
@@ -420,7 +421,7 @@ class SiteBasedAnalysisPipeline:
                 log_dir = os.path.dirname(log_file)
                 if not os.path.exists(log_dir):
                     os.makedirs(log_dir, exist_ok=True)
-                
+
                 with open(log_file, 'a', encoding='utf-8') as f:
                     f.write(f"{datetime.now().strftime('%H:%M:%S')} - {msg}\n")
             except Exception as e:
@@ -456,37 +457,37 @@ class SiteBasedAnalysisPipeline:
                 'iaqi_values': [0, 50, 100, 150, 200, 300, 400, 500]
             }
         }
-        
+
         if pollutant not in breakpoints:
             return np.nan
-        
+
         bp = breakpoints[pollutant]
         conc_levels = bp['concentrations']
         iaqi_levels = bp['iaqi_values']
-        
+
         # 边界检查
         if pd.isna(concentration) or concentration < 0:
             return np.nan
-        
+
         # 线性插值计算IAQI
         for i in range(len(conc_levels) - 1):
             if conc_levels[i] <= concentration <= conc_levels[i + 1]:
                 # IAQI = [(IAQI_high - IAQI_low) / (C_high - C_low)] * (C - C_low) + IAQI_low
-                iaqi = ((iaqi_levels[i + 1] - iaqi_levels[i]) / 
+                iaqi = ((iaqi_levels[i + 1] - iaqi_levels[i]) /
                        (conc_levels[i + 1] - conc_levels[i])) * \
                        (concentration - conc_levels[i]) + iaqi_levels[i]
                 return round(iaqi, 0)
-        
+
         # 超出最高级别
         if concentration > conc_levels[-1]:
             return 500
-        
+
         return 0
 
     def calculate_aqi_from_predictions(self, pred_df):
         """根据预测的污染物浓度计算AQI和首要污染物"""
         pollutants = ['SO2', 'NO2', 'PM10', 'PM2.5', 'CO', 'O3']
-        
+
         # 计算各污染物的IAQI
         for pollutant in pollutants:
             pred_col = f'{pollutant}_预测值'
@@ -495,17 +496,17 @@ class SiteBasedAnalysisPipeline:
                 pred_df[iaqi_col] = pred_df[pred_col].apply(
                     lambda x: self.calculate_iaqi(pollutant, x)
                 )
-        
+
         # 找出所有IAQI列
         iaqi_cols = [col for col in pred_df.columns if col.startswith('IAQI_')]
-        
+
         if iaqi_cols:
             # AQI = max(IAQI)
             pred_df['预测AQI'] = pred_df[iaqi_cols].max(axis=1)
-            
+
             # 确定首要污染物（IAQI最大的污染物）
             def get_primary_pollutant(row):
-                iaqi_values = {col.replace('IAQI_', ''): row[col] 
+                iaqi_values = {col.replace('IAQI_', ''): row[col]
                              for col in iaqi_cols if pd.notna(row[col])}
                 if not iaqi_values:
                     return 'N/A'
@@ -515,9 +516,9 @@ class SiteBasedAnalysisPipeline:
                 # 返回IAQI最大的污染物
                 primary = [p for p, v in iaqi_values.items() if v == max_iaqi]
                 return primary[0] if primary else 'N/A'
-            
+
             pred_df['首要污染物'] = pred_df[iaqi_cols].apply(get_primary_pollutant, axis=1)
-            
+
             # AQI等级
             def get_aqi_level(aqi):
                 if pd.isna(aqi):
@@ -534,9 +535,9 @@ class SiteBasedAnalysisPipeline:
                     return '重度污染'
                 else:
                     return '严重污染'
-            
+
             pred_df['空气质量等级'] = pred_df['预测AQI'].apply(get_aqi_level)
-        
+
         return pred_df
 
     def load_data(self, filepath, log_file):
@@ -554,67 +555,44 @@ class SiteBasedAnalysisPipeline:
                 df = pd.read_csv(filepath, encoding='gbk')
                 if 'TIME' in df.columns:
                     df['TIME'] = pd.to_datetime(df['TIME'])
-        
+
         # 检测是否存在SITENAME字段
         has_sitename = 'SITENAME' in df.columns
-        
+
         if 'TIME' in df.columns:
             df['TIME'] = pd.to_datetime(df['TIME'])
             df = df.sort_values('TIME').reset_index(drop=True)
-            
+
+            # === 数据清洗：处理零值 ===
+            # 说明：PM2.5, PM10, NO2, O3 不应为0（环境浓度极难为绝对0），视为缺失值处理
+            # 例外：CO 和 SO2 保留0值（可能为极低浓度）
+            target_pollutants = ['PM2.5', 'PM10', 'NO2', 'O3']
+            zero_cleaning_report = {}
+
+            for col in target_pollutants:
+                if col in df.columns:
+                    # 统计0值数量
+                    zero_count = (df[col] == 0).sum()
+                    if zero_count > 0:
+                        # 将0替换为NaN，以便后续插值算法处理
+                        df[col] = df[col].replace(0, np.nan)
+                        zero_cleaning_report[col] = zero_count
+
+            if zero_cleaning_report:
+                self.log(f"    [数据清洗] 已移除零值(视为缺失): {zero_cleaning_report} (CO和SO2除外)", log_file)
+            else:
+                self.log(f"    [数据清洗] 未发现需处理的零值", log_file)
+
             # 插值填充缺失值（但不处理AQI列）
             numeric_cols = df.select_dtypes(include=[np.number]).columns
             # 排除AQI列，因为AQI需要根据污染物重新计算，不能插值
             cols_to_interpolate = [col for col in numeric_cols if col not in ['AQI', 'IAQI']]
             if cols_to_interpolate:
+                # 线性插值自动填充刚才转换的NaN以及原始的NaN
                 df[cols_to_interpolate] = df[cols_to_interpolate].interpolate(method='linear').fillna(method='bfill').fillna(method='ffill')
-            
-            # === 零值清洗协议 (Zero Value Cleaning Protocol) ===
-            # 污染物中除CO和SO2外，零值通常表示测量异常或仪器故障
-            # CO和SO2在低排放条件下可能合法地接近零
-            pollutants_to_clean = ['PM2.5', 'PM10', 'O3', 'NO2']  # 需要清洗零值的污染物
-            pollutants_to_keep = ['CO', 'SO2']  # 保留零值的污染物
-            
-            original_len = len(df)
-            zero_value_report = {}
-            
-            for pollutant in pollutants_to_clean:
-                if pollutant in df.columns:
-                    # 统计零值数量
-                    zero_count = (df[pollutant] == 0).sum()
-                    zero_value_report[pollutant] = zero_count
-                    
-                    if zero_count > 0:
-                        # 将零值替换为NaN，然后通过插值填充
-                        df.loc[df[pollutant] == 0, pollutant] = np.nan
-            
-            # 对清洗后的零值进行插值填充
-            for pollutant in pollutants_to_clean:
-                if pollutant in df.columns:
-                    df[pollutant] = df[pollutant].interpolate(method='linear').fillna(method='bfill').fillna(method='ffill')
-            
-            # 生成零值清洗报告
-            if any(zero_value_report.values()):
-                self.log(f"\n{'='*50}", log_file)
-                self.log(f"零值清洗报告 (Zero Value Cleaning Report)", log_file)
-                self.log(f"{'='*50}", log_file)
-                self.log(f"总数据量: {original_len} 条", log_file)
-                
-                total_cleaned = 0
-                for pollutant, count in zero_value_report.items():
-                    if count > 0:
-                        percentage = count / original_len * 100
-                        self.log(f"  {pollutant}: 移除 {count} 个零值 ({percentage:.2f}%)", log_file)
-                        total_cleaned += count
-                
-                self.log(f"  ─────────────────────────────", log_file)
-                self.log(f"  总计清洗: {total_cleaned} 个零值", log_file)
-                self.log(f"  保留零值: CO, SO₂ (可能为合法低浓度值)", log_file)
-                self.log(f"  清洗方法: 零值→NaN→线性插值填充", log_file)
-                self.log(f"{'='*50}\n", log_file)
-            
+
             # === 特征构造（使用有物理意义的衍生特征）===
-            
+
             # 高优先级特征
             # 1. 风矢量分解（添加静风阈值，避免噪声）
             if 'WIND' in df.columns and 'WINDDIR' in df.columns:
@@ -629,26 +607,26 @@ class SiteBasedAnalysisPipeline:
                     -df['WIND'] * np.cos(np.radians(df['WINDDIR'])),
                     0  # 静风时为0
                 )
-            
+
             # 2. PM比值（改进除零保护，避免扰曲真实比值）
             if 'PM2.5' in df.columns and 'PM10' in df.columns:
                 # 只在PM10>0.1时计算比值，否则为NaN
                 df['PM_Ratio'] = np.where(
-                    df['PM10'] > 0.1, 
-                    df['PM2.5'] / df['PM10'], 
+                    df['PM10'] > 0.1,
+                    df['PM2.5'] / df['PM10'],
                     np.nan
                 )
                 # 裁剪到合理范围 [0, 1]（PM2.5理论上不应超过PM10）
                 df['PM_Ratio'] = df['PM_Ratio'].clip(0, 1)
-            
+
             # 3. 昼夜标识（光化学反应、边界层高度的日变化）
             if 'TIME' in df.columns:
                 df['Hour'] = df['TIME'].dt.hour
                 df['Is_Daytime'] = ((df['Hour'] >= 6) & (df['Hour'] < 18)).astype(int)
-                
+
                 # 4. 工作日/周末（人为活动的周期变化）
                 df['Is_Weekend'] = (df['TIME'].dt.dayofweek >= 5).astype(int)
-            
+
             # 中优先级特征
             # 5. 大气稳定度（使用绝对温度避免负值，并裁剪异常值）
             if 'TEMP' in df.columns and 'WIND' in df.columns:
@@ -656,23 +634,23 @@ class SiteBasedAnalysisPipeline:
                 stability = (df['TEMP'] + 273.15) / (df['WIND'] + 0.1)
                 # 裁剪到合理范围 [0, 500] K·s/m
                 df['Atmospheric_Stability'] = np.clip(stability, 0, 500)
-            
-            
+
+
             # 6. 绝对湿度（添加范围验证，使用Magnus公式）
             if 'TEMP' in df.columns and 'R' in df.columns:
                 # 限制输入范围，防止极端值导致计算错误
                 temp_valid = df['TEMP'].clip(-50, 50)  # 温度范围：-50°C 到 50°C
                 r_valid = df['R'].clip(0, 100)  # 相对湿度：0% 到 100%
-                
+
                 # Magnus公式计算饱和水气压
                 saturation_vapor = 6.112 * np.exp(17.67 * temp_valid / (temp_valid + 243.5))
-                
+
                 # 计算绝对湿度
                 absolute_humidity = (r_valid / 100) * saturation_vapor * 2.1674 / (temp_valid + 273.15)
-                
+
                 # 裁剪到合理范围 [0, 50] g/m³
                 df['Absolute_Humidity'] = np.clip(absolute_humidity, 0, 50)
-            
+
             # === 重要：处理衍生特征产生的NaN ===
             # PM_Ratio可能产生NaN，需要填充
             derived_features = ['PM_Ratio', 'U_Wind', 'V_Wind', 'Atmospheric_Stability', 'Absolute_Humidity']
@@ -680,7 +658,7 @@ class SiteBasedAnalysisPipeline:
                 if feat in df.columns:
                     # 使用前向填充 + 后向填充 + 0填充
                     df[feat] = df[feat].fillna(method='ffill').fillna(method='bfill').fillna(0)
-            
+
             # 季节特征处理
             if '季节' in df.columns:
                 season_map = {'冬': 0, '春': 1, '夏': 2, '秋': 3}
@@ -700,7 +678,7 @@ class SiteBasedAnalysisPipeline:
                     else:
                         return 3  # 秋
                 df['season_code'] = df['month'].apply(get_season)
-        
+
         return df, has_sitename
 
     def feature_selection_physics(self, df, target, mode='strict', enable_physics_purification=False, log_file=None):
@@ -711,14 +689,14 @@ class SiteBasedAnalysisPipeline:
         enable_physics_purification: 是否开启物理净化 (防止数据泄露)
         """
         drop_cols = [target]
-        
+
         # 全局排除结果指标（不能作为特征）
         result_indicators = ['AQI', 'VIS']  # AQI是综合指标，VIS是能见度（受污染物影响的结果）
         drop_cols.extend(result_indicators)
-        
+
         # 排除非数值列 (SITENAME, TIME 等)
         df_num = df.select_dtypes(include=[np.number])
-        
+
         # === 核心逻辑：物理净化 (防止数据泄露) ===
         if enable_physics_purification:
             if target == 'PM2.5':
@@ -730,13 +708,13 @@ class SiteBasedAnalysisPipeline:
                         removed.append(b)
                 if mode == 'strict' and log_file:
                     self.log(f"    -> [防泄露] 预测PM2.5，强制剔除: {removed}", log_file)
-                    
+
             elif target == 'PM10':
                 if 'PM2.5' in df_num.columns:
                     drop_cols.append('PM2.5')
                     if mode == 'strict' and log_file:
                         self.log(f"    -> [防泄露] 预测PM10，强制剔除: ['PM2.5']", log_file)
-            
+
             elif target == 'SO2':
                 # SO2分析时可以考虑剔除相关污染物避免多重共线性
                 so2_blacklist = ['NO2']  # 可根据实际情况调整
@@ -747,7 +725,7 @@ class SiteBasedAnalysisPipeline:
                         removed.append(b)
                 if mode == 'strict' and log_file and removed:
                     self.log(f"    -> [防泄露] 预测SO2，强制剔除: {removed}", log_file)
-            
+
             elif target == 'NO2':
                 # NO2分析时可以考虑剔除相关污染物
                 no2_blacklist = ['SO2']  # 可根据实际情况调整
@@ -758,7 +736,7 @@ class SiteBasedAnalysisPipeline:
                         removed.append(b)
                 if mode == 'strict' and log_file and removed:
                     self.log(f"    -> [防泄露] 预测NO2，强制剔除: {removed}", log_file)
-            
+
             elif target == 'CO':
                 # CO分析时可以考虑剔除相关污染物
                 co_blacklist = ['PM2.5', 'PM10']  # 可根据实际情况调整
@@ -769,27 +747,27 @@ class SiteBasedAnalysisPipeline:
                         removed.append(b)
                 if mode == 'strict' and log_file and removed:
                     self.log(f"    -> [防泄露] 预测CO，强制剔除: {removed}", log_file)
-        
+
         # 初始特征
         X = df_num.drop(columns=drop_cols, errors='ignore')
         feature_names = X.columns.tolist()
-        
+
         # 设定阈值
         threshold_vif = 10.0 if mode == 'strict' else 100.0
         threshold_pearson = 0.90 if mode == 'strict' else 0.99
-        
+
         # 1. 方差过滤
         sel = VarianceThreshold(threshold=0.01)
         sel.fit(X)
         curr_feats = [f for i, f in enumerate(feature_names) if sel.get_support()[i]]
-        
+
         # 2. 皮尔逊去重
         df_curr = df_num[curr_feats]
         corr_matrix = df_curr.corr().abs()
         upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
         to_drop = [column for column in upper.columns if any(upper[column] > threshold_pearson)]
         feat_p = [f for f in curr_feats if f not in to_drop]
-        
+
         # 3. VIF 过滤
         df_vif = df_num[feat_p].copy()
         while True:
@@ -803,9 +781,9 @@ class SiteBasedAnalysisPipeline:
                     break
             except:
                 break
-        
+
         final_feats = df_vif.columns.tolist()
-        
+
         # 4. 专家召回规则 - 根据污染物类型补充重要特征
         if target == 'O3':
             important = ['R', 'NO2', 'TEMP']
@@ -830,14 +808,14 @@ class SiteBasedAnalysisPipeline:
             for f in important:
                 if f in df_num.columns and f not in final_feats:
                     final_feats.append(f)
-        
+
         return df_num[final_feats].values, df_num[target].values.reshape(-1, 1), final_feats
 
     def optimize_model(self, X, y, model_name, log_file):
         """贝叶斯超参数优化"""
         if not BAYESIAN_AVAILABLE:
             return self.get_default_model(model_name)
-        
+
         if model_name in ['xgboost', 'random_forest']:
             if model_name == 'xgboost':
                 est = XGBRegressor(n_jobs=-1, random_state=42)
@@ -901,29 +879,29 @@ class SiteBasedAnalysisPipeline:
         site_name: 站点名称（None表示全局分析）
         """
         paths, log_file = self.create_output_structure(site_name)
-        
+
         title = f"站点: {site_name}" if site_name else "全局分析"
         self.log(f"\n{'='*60}\n{title}\n{'='*60}", log_file)
         self.log(f"数据量: {len(df)} 条记录", log_file)
-        
+
         # 提取数值列和时间轴
         df_num = df.select_dtypes(include=[np.number])
         time_axis = df['TIME'] if 'TIME' in df.columns else None
-        
+
         summary = []
         # 用于存储所有污染物的预测结果
         all_predictions = {}
-        
+
         for target in targets:
             if target not in df_num.columns:
                 self.log(f"警告: 目标变量 {target} 不存在于数据中，跳过", log_file)
                 continue
-            
+
             self.log(f"\n{'='*50}\n正在分析目标: {target}\n{'='*50}", log_file)
-            
+
             # 双轨制特征选择
             X_strict, y, feats_strict = self.feature_selection_physics(
-                df, target, mode='strict', 
+                df, target, mode='strict',
                 enable_physics_purification=enable_physics_purification,
                 log_file=log_file
             )
@@ -932,19 +910,19 @@ class SiteBasedAnalysisPipeline:
                 enable_physics_purification=enable_physics_purification,
                 log_file=None
             )
-            
+
             # 使用时序分割验证（避免未来信息泄漏）
             # 对于时间序列数据，使用TimeSeriesSplit更合适
             tscv = TimeSeriesSplit(n_splits=7)  # 使用7折以获得更准确的性能估计
             models = ['xgboost', 'random_forest', 'linear_regression']
             if TF_AVAILABLE:
                 models.append('lstm')
-            
+
             # 为每个目标选择最佳模型（用于AQI计算）
             best_model_name = None
             best_r2 = -np.inf
             best_predictions = None
-            
+
             for m_name in models:
                 # 根据模型选择特征集
                 if m_name in ['xgboost', 'random_forest']:
@@ -953,43 +931,43 @@ class SiteBasedAnalysisPipeline:
                 else:
                     X_curr, feats_curr = X_strict, feats_strict
                     mode_desc = "严格特征集"
-                
+
                 self.log(f"  > 模型: {m_name:<18} | 策略: {mode_desc} (特征数:{len(feats_curr)})", log_file)
-                
+
                 # 针对低浓度/偏态分布污染物（SO2, CO, NO2），不再启用对数变换
                 # 因为对数变换对低浓度污染物反而破坏了线性关系
                 use_log_target = False
                 # 如果确实需要对某些污染物使用对数变换，可以在这里单独指定
                 # use_log_target = target in ['某些污染物']
-                
+
                 # 参数优化 (如果是对数变换模式，传入对数转换后的y)
                 y_for_opt = np.log1p(y) if use_log_target else y
                 base_model = self.optimize_model(X_curr, y_for_opt, m_name, log_file)
-                
+
                 r2s, rmses, maes = [], [], []  # 添加MAE列表
                 pearson_rs = []  # Pearson相关系数
                 p_values = []    # p值
                 full_pred = np.full(len(y), np.nan)  # 使用NaN初始化，标记未预测的部分
-                
+
                 last_model_for_shap = None
                 last_X_train_for_shap = None
-                
+
                 # 交叉验证训练
                 for t_idx, v_idx in tscv.split(X_curr):
                     X_t, X_v = X_curr[t_idx], X_curr[v_idx]
                     y_t, y_v = y[t_idx], y[v_idx]
-                    
+
                     # 特征标准化（所有模型都需要）
                     sc_x = StandardScaler()
                     X_t_s = sc_x.fit_transform(X_t)
                     X_v_s = sc_x.transform(X_v)
-                    
+
                     # 目标变量处理（对数变换 + 标准化）
                     if use_log_target:
                         y_t_proc = np.log1p(y_t)
                     else:
                         y_t_proc = y_t
-                    
+
                     # 根据模型类型选择是否标准化目标变量
                     # 学术最佳实践：树模型不标准化目标变量，避免负值风险
                     if m_name in ['random_forest', 'xgboost']:
@@ -1005,7 +983,7 @@ class SiteBasedAnalysisPipeline:
                             p_real = p
                         last_model_for_shap = model
                         last_X_train_for_shap = X_t_s
-                        
+
                     elif m_name == 'lstm':
                         # LSTM：标准化目标变量（神经网络训练需要）
                         sc_y = StandardScaler()
@@ -1022,7 +1000,7 @@ class SiteBasedAnalysisPipeline:
                             p_real = np.expm1(p_inv)
                         else:
                             p_real = p_inv
-                            
+
                     else:  # linear_regression
                         # 线性模型：标准化目标变量（提高数值稳定性）
                         sc_y = StandardScaler()
@@ -1038,22 +1016,22 @@ class SiteBasedAnalysisPipeline:
                             p_real = p_inv
                         last_model_for_shap = model
                         last_X_train_for_shap = X_t_s
-                    
+
                     # 确保所有预测值非负（污染物浓度不能为负）
                     # 注：树模型通常不会产生负值，但保险起见仍然应用此约束
                     p_real = np.maximum(p_real, 0)
-                    
+
                     full_pred[v_idx] = p_real
-                    
+
                     # 确保y_v和p_real都是1D数组
                     y_v_flat = y_v.flatten() if hasattr(y_v, 'flatten') else y_v
                     p_real_flat = p_real.flatten() if hasattr(p_real, 'flatten') else p_real
-                    
+
                     # 计算基本指标
                     r2s.append(r2_score(y_v_flat, p_real_flat))
                     rmses.append(np.sqrt(mean_squared_error(y_v_flat, p_real_flat)))
                     maes.append(mean_absolute_error(y_v_flat, p_real_flat))
-                    
+
                     # 计算Pearson相关系数和p值（统计显著性）
                     try:
                         pearson_r, pearson_p = stats.pearsonr(y_v_flat, p_real_flat)
@@ -1064,27 +1042,27 @@ class SiteBasedAnalysisPipeline:
                         pearson_rs.append(np.nan)
                         p_values.append(np.nan)
                         self.log(f"    警告: Pearson计算失败: {str(e)}", log_file)
-                
+
                 # 计算平均值
                 avg_r2 = np.mean(r2s)
                 avg_rmse = np.mean(rmses)
                 avg_mae = np.mean(maes)
                 avg_pearson = np.mean(pearson_rs)
                 avg_p_value = np.mean(p_values)
-                
+
                 # 计算95%置信区间（使用t分布）
                 n_folds = len(r2s)
                 r2_std = np.std(r2s, ddof=1)
                 rmse_std = np.std(rmses, ddof=1)
                 mae_std = np.std(maes, ddof=1)
-                
+
                 # t分布的临界值（双尾，95%置信度）
                 t_critical = stats.t.ppf(0.975, n_folds - 1)
-                
+
                 r2_ci_margin = t_critical * r2_std / np.sqrt(n_folds)
                 rmse_ci_margin = t_critical * rmse_std / np.sqrt(n_folds)
                 mae_ci_margin = t_critical * mae_std / np.sqrt(n_folds)
-                
+
                 # 截断置信区间到合理范围
                 r2_ci_lower = avg_r2 - r2_ci_margin  # R²下界不截断（允许负值）
                 r2_ci_upper = min(avg_r2 + r2_ci_margin, 1.0)  # R²上界最大1.0
@@ -1092,29 +1070,29 @@ class SiteBasedAnalysisPipeline:
                 rmse_ci_upper = avg_rmse + rmse_ci_margin
                 mae_ci_lower = max(avg_mae - mae_ci_margin, 0)  # MAE下界最大0
                 mae_ci_upper = avg_mae + mae_ci_margin
-                
+
                 # 记录日志（包含截断后的置信区间）
                 self.log(
                     f"    评估: R²={avg_r2:.4f}±{r2_std:.4f} (95%CI:[{r2_ci_lower:.4f},{r2_ci_upper:.4f}]) | "
-                    f"RMSE={avg_rmse:.4f}±{rmse_std:.4f} | MAE={avg_mae:.4f}±{mae_std:.4f}", 
+                    f"RMSE={avg_rmse:.4f}±{rmse_std:.4f} | MAE={avg_mae:.4f}±{mae_std:.4f}",
                     log_file
                 )
-                
+
                 # === 诊断日志：详细分析交叉验证结果 ===
                 if r2_std > 0.15 or (avg_r2 + r2_ci_margin) > 1.05:
                     # 只在有问题时输出详细诊断
                     self.log(f"    [诊断] 交叉验证详情:", log_file)
                     for i, r2_val in enumerate(r2s, 1):
                         self.log(f"      Fold {i}: R²={r2_val:.4f}", log_file)
-                    
+
                     # 计算变异系数
                     cv_coef = (r2_std / avg_r2 * 100) if avg_r2 > 0 else 0
                     self.log(f"      变异系数: {cv_coef:.1f}%", log_file)
-                    
+
                     # CI超限警告
                     if (avg_r2 + r2_ci_margin) > 1.0:
                         self.log(f"      ⚠️  CI原始上界={avg_r2+r2_ci_margin:.4f} 超过1.0，已截断到1.0", log_file)
-                    
+
                     # 稳定性评估
                     if r2_std > 0.2:
                         self.log(f"      ⚠️  标准差过大（>{0.2:.1f}），模型稳定性较差", log_file)
@@ -1122,9 +1100,9 @@ class SiteBasedAnalysisPipeline:
                         self.log(f"      ⚠️  变异系数>15%，不同fold性能差异较大", log_file)
                     else:
                         self.log(f"      ✅ 性能稳定性可接受", log_file)
-                
+
                 self.log(f"    Pearson r={avg_pearson:.4f}, p={avg_p_value:.2e}", log_file)
-                
+
                 summary.append({
                     '站点': site_name if site_name else '全局',
                     '目标': target,
@@ -1141,22 +1119,22 @@ class SiteBasedAnalysisPipeline:
                     'P_value': avg_p_value,
                     '特征': ",".join(feats_curr)
                 })
-                
+
                 # 记录最佳模型的预测结果（用于AQI计算）
                 if avg_r2 > best_r2:
                     best_r2 = avg_r2
                     best_model_name = m_name
                     best_predictions = full_pred.copy()
-                
+
                 # 输出结果
                 self.plot_results(time_axis, y.flatten(), full_pred, target, m_name, avg_r2, avg_rmse, avg_mae, paths)
                 self.save_pred_data(time_axis, y.flatten(), full_pred, target, m_name, paths)
-                
+
                 # SHAP 分析
                 if SHAP_AVAILABLE and last_model_for_shap and m_name != 'lstm':
                     self.run_shap(last_model_for_shap, last_X_train_for_shap, feats_curr, target, m_name, paths)
                     self.calc_importance(last_model_for_shap, feats_curr, target, m_name, paths)
-            
+
             # 存储该污染物的最佳预测结果
             if best_predictions is not None:
                 all_predictions[target] = {
@@ -1165,17 +1143,17 @@ class SiteBasedAnalysisPipeline:
                     '最佳模型': best_model_name,
                     'R2': best_r2
                 }
-        
+
         # === 新增: AQI整合分析 ===
         if all_predictions:
             self.log(f"\n{'='*60}\n整合预测结果并计算AQI\n{'='*60}", log_file)
             self.generate_aqi_integration_report(all_predictions, time_axis, paths, log_file, site_name)
-        
+
         # 保存当前站点/全局的汇总结果
         summary_df = pd.DataFrame(summary)
         summary_path = os.path.join(paths['data'], "结果汇总.csv")
         summary_df.to_csv(summary_path, index=False, encoding='utf-8-sig')
-        
+
         # === 新增：生成模型性能总汇总文件（论文级格式） ===
         if summary:
             # 提取关键指标，生成易读的总汇总表
@@ -1193,9 +1171,9 @@ class SiteBasedAnalysisPipeline:
                     'P_value': f"{item['P_value']:.2e}"
                 }
                 performance_summary.append(perf_row)
-            
+
             perf_df = pd.DataFrame(performance_summary)
-            
+
             # 按污染物分组，标记每个污染物的最佳模型（R²最高）
             perf_df['Best'] = ''
             for pollutant in perf_df['Pollutant'].unique():
@@ -1203,51 +1181,51 @@ class SiteBasedAnalysisPipeline:
                 pollutant_df = perf_df[mask]
                 best_idx = pollutant_df['R²'].astype(float).idxmax()
                 perf_df.loc[best_idx, 'Best'] = '✓'  # 勾选标记
-            
+
             # 按污染物和R²排序
             perf_df['R²_float'] = perf_df['R²'].astype(float)
             perf_df = perf_df.sort_values(['Pollutant', 'R²_float'], ascending=[True, False])
             perf_df = perf_df.drop(columns=['R²_float'])
-            
+
             perf_summary_path = os.path.join(paths['data'], "Model_Performance_Summary.csv")
             perf_df.to_csv(perf_summary_path, index=False, encoding='utf-8-sig')
             self.log(f"\n>>> 模型性能总汇总已保存: Model_Performance_Summary.csv（包含置信区间和统计显著性）", log_file)
-        
+
         self.log(f"\n>>> 分析完成！结果已保存", log_file)
-        
+
         return summary
 
     def generate_aqi_integration_report(self, all_predictions, time_axis, paths, log_file, site_name):
         """生成AQI整合报告"""
         self.log("正在生成AQI整合预测表...", log_file)
-        
+
         # 创建基础数据框
         n_samples = len(list(all_predictions.values())[0]['真实值'])
-        
+
         # 构建整合数据框
         integrated_df = pd.DataFrame()
-        
+
         # 添加时间列
         if time_axis is not None:
             integrated_df['时间'] = time_axis
         else:
             integrated_df['序号'] = range(n_samples)
-        
+
         # 添加站点信息
         if site_name:
             integrated_df['站点'] = site_name
-        
+
         # 添加各污染物的真实值和预测值
         for pollutant, pred_data in all_predictions.items():
             integrated_df[f'{pollutant}_真实值'] = pred_data['真实值']
             integrated_df[f'{pollutant}_预测值'] = pred_data['预测值']
             integrated_df[f'{pollutant}_模型'] = pred_data['最佳模型']
             integrated_df[f'{pollutant}_R2'] = pred_data['R2']
-        
+
         # 计算预测AQI（基于预测值）
         self.log("正在计算预测AQI和首要污染物...", log_file)
         integrated_df = self.calculate_aqi_from_predictions(integrated_df)
-        
+
         # 计算真实AQI（优先使用原始数据，没有才计算）
         if 'AQI' in integrated_df.columns:
             # 原始数据中已有AQI，直接使用
@@ -1265,17 +1243,17 @@ class SiteBasedAnalysisPipeline:
             for pollutant in all_predictions.keys():
                 true_df_for_aqi[f'{pollutant}_预测值'] = integrated_df[f'{pollutant}_真实值']
             true_df_with_aqi = self.calculate_aqi_from_predictions(true_df_for_aqi)
-            
+
             if '预测AQI' in true_df_with_aqi.columns:
                 integrated_df['真实AQI'] = true_df_with_aqi['预测AQI']
                 integrated_df['真实首要污染物'] = true_df_with_aqi['首要污染物']
                 integrated_df['真实空气质量等级'] = true_df_with_aqi['空气质量等级']
-        
+
         # 计算AQI预测误差
         if '真实AQI' in integrated_df.columns and '预测AQI' in integrated_df.columns:
             integrated_df['AQI预测误差'] = integrated_df['预测AQI'] - integrated_df['真实AQI']
             integrated_df['AQI预测误差率(%)'] = (integrated_df['AQI预测误差'] / integrated_df['真实AQI'].replace(0, np.nan)) * 100
-        
+
         # === 重要：过滤掉没有预测值的行（TimeSeriesSplit只在验证集上有预测） ===
         # 检查是否有任何污染物的预测值
         pollutant_cols = [col for col in integrated_df.columns if col.endswith('_预测值')]
@@ -1287,45 +1265,45 @@ class SiteBasedAnalysisPipeline:
             filtered_len = original_len - len(integrated_df)
             if filtered_len > 0:
                 self.log(f"过滤掉 {filtered_len} 行无预测值的数据（TimeSeriesSplit交叉验证模式下，只有验证集有预测值）", log_file)
-        
+
         # 保存整合预测表
         aqi_report_path = os.path.join(paths['data'], "AQI整合预测表.csv")
         integrated_df.to_csv(aqi_report_path, index=False, encoding='utf-8-sig')
         self.log(f"AQI整合预测表已保存: {aqi_report_path}", log_file)
-        
+
         # 生成AQI预测统计摘要
         if '预测AQI' in integrated_df.columns and '真实AQI' in integrated_df.columns:
             # 清理AQI数据：移除NaN值
             aqi_valid_mask = integrated_df[['真实AQI', '预测AQI']].notna().all(axis=1)
             aqi_clean_df = integrated_df[aqi_valid_mask]
-            
+
             if len(aqi_clean_df) == 0:
                 self.log("  ⚠️  无有效AQI数据进行评估", log_file)
                 return
-            
+
             aqi_mae = mean_absolute_error(aqi_clean_df['真实AQI'], aqi_clean_df['预测AQI'])
             aqi_rmse = np.sqrt(mean_squared_error(aqi_clean_df['真实AQI'], aqi_clean_df['预测AQI']))
             aqi_r2 = r2_score(aqi_clean_df['真实AQI'], aqi_clean_df['预测AQI'])
-            
+
             # 首要污染物预测准确率（基于清理后的数据）
             if '首要污染物' in aqi_clean_df.columns and '真实首要污染物' in aqi_clean_df.columns:
                 primary_accuracy = (aqi_clean_df['首要污染物'] == aqi_clean_df['真实首要污染物']).sum() / len(aqi_clean_df) * 100
             else:
                 primary_accuracy = 0
-            
+
             # 等级预测准确率（基于清理后的数据）
             if '空气质量等级' in aqi_clean_df.columns and '真实空气质量等级' in aqi_clean_df.columns:
                 level_accuracy = (aqi_clean_df['空气质量等级'] == aqi_clean_df['真实空气质量等级']).sum() / len(aqi_clean_df) * 100
             else:
                 level_accuracy = 0
-            
+
             self.log(f"\nAQI预测性能:", log_file)
             self.log(f"  MAE: {aqi_mae:.2f}", log_file)
             self.log(f"  RMSE: {aqi_rmse:.2f}", log_file)
             self.log(f"  R²: {aqi_r2:.4f}", log_file)
             self.log(f"  首要污染物预测准确率: {primary_accuracy:.2f}%", log_file)
             self.log(f"  空气质量等级预测准确率: {level_accuracy:.2f}%", log_file)
-            
+
             # 保存AQI统计摘要
             aqi_stats = {
                 '站点': [site_name if site_name else '全局'],
@@ -1339,31 +1317,31 @@ class SiteBasedAnalysisPipeline:
             aqi_stats_df = pd.DataFrame(aqi_stats)
             aqi_stats_path = os.path.join(paths['data'], "AQI预测统计.csv")
             aqi_stats_df.to_csv(aqi_stats_path, index=False, encoding='utf-8-sig')
-            
+
             # 绘制AQI预测对比图
             self.plot_aqi_comparison(integrated_df, paths, site_name)
-        
+
         self.log("AQI整合分析完成！", log_file)
 
     def plot_aqi_comparison(self, integrated_df, paths, site_name):
         """绘制AQI预测对比图（优化版）"""
         if '预测AQI' not in integrated_df.columns or '真实AQI' not in integrated_df.columns:
             return
-        
+
         from scipy import stats
-        
+
         # 1. AQI时序对比图
         fig, ax = plt.subplots(figsize=(12, 5))
         if '时间' in integrated_df.columns:
-            ax.plot(integrated_df['时间'], integrated_df['真实AQI'], 
+            ax.plot(integrated_df['时间'], integrated_df['真实AQI'],
                     'k-', alpha=0.6, label='Observed AQI', linewidth=1.5)
-            ax.plot(integrated_df['时间'], integrated_df['预测AQI'], 
+            ax.plot(integrated_df['时间'], integrated_df['预测AQI'],
                     'r--', alpha=0.8, label='Predicted AQI', linewidth=1.5)
             plt.gcf().autofmt_xdate()
         else:
             ax.plot(integrated_df['真实AQI'], 'k-', alpha=0.6, label='Observed AQI', linewidth=1.5)
             ax.plot(integrated_df['预测AQI'], 'r--', alpha=0.8, label='Predicted AQI', linewidth=1.5)
-        
+
         # 简化标题
         title = f"AQI-{site_name}" if site_name else "AQI"
         ax.set_title(title, fontsize=14, fontweight='bold')
@@ -1374,10 +1352,10 @@ class SiteBasedAnalysisPipeline:
         plt.tight_layout()
         plt.savefig(os.path.join(paths['series'], "AQI_时序对比.png"), dpi=300, bbox_inches='tight')
         plt.close('all')  # 关闭所有图表释放内存
-        
+
         # 注意：AQI图表已简化，只保留时序图
 
-    def run(self, data_path, targets=['NO2', 'CO', 'SO2', 'PM2.5', 'PM10', 'O3'], 
+    def run(self, data_path, targets=['NO2', 'CO', 'SO2', 'PM2.5', 'PM10', 'O3'],
             enable_physics_purification=False, site_filter=None):
         """
         主执行流程
@@ -1391,30 +1369,30 @@ class SiteBasedAnalysisPipeline:
             # 是文件夹，批量处理
             print(f"\n检测到文件夹: {data_path}")
             print(f"正在扫描数据文件...\n")
-            
+
             # 扫描所有支持的数据文件
             data_files = []
             for file in os.listdir(data_path):
                 if file.endswith(('.csv', '.xlsx', '.xls')) and not file.startswith('~'):  # 排除临时文件
                     data_files.append(os.path.join(data_path, file))
-            
+
             if not data_files:
                 print(f"错误: 文件夹 '{data_path}' 中没有找到数据文件 (.csv/.xlsx)")
                 return
-            
+
             # 按文件名排序
             data_files.sort()
             print(f"找到 {len(data_files)} 个数据文件:")
             for i, file in enumerate(data_files, 1):
                 print(f"  {i}. {os.path.basename(file)}")
             print()
-            
+
             # 依次处理每个文件
             for i, file_path in enumerate(data_files, 1):
                 print(f"\n{'='*70}")
                 print(f"正在处理文件 {i}/{len(data_files)}: {os.path.basename(file_path)}")
                 print(f"{'='*70}\n")
-                
+
                 try:
                     # 为每个文件调用单文件处理逻辑
                     self._process_single_file(file_path, targets, enable_physics_purification, site_filter)
@@ -1422,41 +1400,41 @@ class SiteBasedAnalysisPipeline:
                     print(f"\n错误: 处理文件 {os.path.basename(file_path)} 失败: {str(e)}")
                     print(f"继续处理下一个文件...\n")
                     continue
-                
+
                 # 每个文件处理后释放内存
                 gc.collect()
-            
+
             print(f"\n{'='*70}")
             print(f"批量处理完成！共处理 {len(data_files)} 个文件")
             print(f"结果保存在: {self.root_dir}")
             print(f"{'='*70}\n")
-            
+
         else:
             # 是单个文件，直接处理
             self._process_single_file(data_path, targets, enable_physics_purification, site_filter)
-    
+
     def _process_single_file(self, data_path, targets, enable_physics_purification, site_filter):
         """
         处理单个数据文件
         """
         # 保存数据文件名（用于输出文件夹命名）
         self.data_filename = os.path.basename(data_path)
-        
+
         # 创建临时日志文件用于初始加载
         temp_log = os.path.join(self.root_dir, "加载日志.txt")
-        
+
         # 加载数据
         df, has_sitename = self.load_data(data_path, temp_log)
-        
+
         all_summaries = []
-        
+
         if has_sitename:
             self.log(f"检测到 SITENAME 字段，启用站点分组分析模式", temp_log)
-            
+
             # 获取所有站点
             sites = df['SITENAME'].unique()
             self.log(f"发现 {len(sites)} 个站点: {', '.join(sites)}", temp_log)
-            
+
             if site_filter:
                 # 检查指定站点是否存在
                 if site_filter not in sites:
@@ -1470,7 +1448,7 @@ class SiteBasedAnalysisPipeline:
                 else:
                     sites = [site_filter]
                     self.log(f"仅分析指定站点: {site_filter}", temp_log)
-            
+
             # 按站点分组分析
             for site in sites:
                 site_data = df[df['SITENAME'] == site].copy()
@@ -1480,20 +1458,20 @@ class SiteBasedAnalysisPipeline:
                 all_summaries.extend(summary)
         else:
             self.log(f"未检测到 SITENAME 字段，使用全局分析模式", temp_log)
-            
+
             if site_filter:
                 self.log(f"提示: 数据中不存在 SITENAME 字段，忽略站点过滤参数", temp_log)
-            
+
             # 全局分析
             summary = self.analyze_single_dataset(
                 df, None, targets, enable_physics_purification, self.root_dir
             )
             all_summaries.extend(summary)
-            
+
             # 释放内存
             del df
             gc.collect()
-        
+
         # 保存总汇总
         if all_summaries:
             final_summary_df = pd.DataFrame(all_summaries)
@@ -1524,13 +1502,13 @@ class SiteBasedAnalysisPipeline:
         - 添加拟合线信息
         """
         from scipy import stats
-        
+
         # 格式化污染物名称
         formatted_target = format_pollutant_name(target)
-        
+
         # 计算拟合线参数
         slope, intercept, r_value, p_value, std_err = stats.linregress(y_true, y_pred)
-        
+
         # 1. 时序图
         fig, ax = plt.subplots(figsize=(10, 4))
         if times is not None:
@@ -1540,59 +1518,59 @@ class SiteBasedAnalysisPipeline:
         else:
             ax.plot(y_true, 'k-', alpha=0.6, label='Observed', linewidth=1.5)
             ax.plot(y_pred, 'r--', alpha=0.8, label='Predicted', linewidth=1.5)
-        
+
         ax.set_title(f"{formatted_target}-{model}", fontsize=14, fontweight='bold')
         ax.legend(fontsize=10)
         ax.grid(alpha=0.3)
-        
+
         plt.tight_layout()
         plt.savefig(os.path.join(paths['series'], f"{target}_{model}.png"), dpi=300, bbox_inches='tight')
         plt.close()
-        
-        
+
+
         # 2. 核密度估计散点图 (KDE Density Scatter Plot)
         if len(y_true) >= 50:
             try:
                 from scipy.stats import gaussian_kde
-                
+
                 # 清理数据：移除NaN和inf值
                 valid_mask = np.isfinite(y_true) & np.isfinite(y_pred)
                 if not np.any(valid_mask):
                     print(f"⚠️  KDE散点图跳过 ({target}_{model}): 无有效数据")
                     return
-                
+
                 y_true_clean = y_true[valid_mask]
                 y_pred_clean = y_pred[valid_mask]
-                
+
                 # 确保有足够的数据点
                 if len(y_true_clean) < 10:
                     print(f"⚠️  KDE散点图跳过 ({target}_{model}): 有效数据点不足 ({len(y_true_clean)} < 10)")
                     return
-                
+
                 # 计算密度
                 xy = np.vstack([y_true_clean, y_pred_clean])
                 z = gaussian_kde(xy)(xy)
-                
+
                 # 按密度排序，让高密度点显示在上层
                 idx = z.argsort()
                 y_true_sorted, y_pred_sorted, z_sorted = y_true_clean[idx], y_pred_clean[idx], z[idx]
-                
+
                 fig, ax = plt.subplots(figsize=(7, 6))
-                
+
                 # 绘制密度散点
-                scatter = ax.scatter(y_true_sorted, y_pred_sorted, c=z_sorted, 
+                scatter = ax.scatter(y_true_sorted, y_pred_sorted, c=z_sorted,
                                     s=20, cmap='viridis', alpha=0.6, edgecolors='none')
                 cbar = plt.colorbar(scatter, ax=ax, label='Kernel Density')
-                
+
                 # 绘制1:1线（理想拟合线）
                 vmin = min(y_true_clean.min(), y_pred_clean.min())
                 vmax = max(y_true_clean.max(), y_pred_clean.max())
                 ax.plot([vmin, vmax], [vmin, vmax], 'k--', lw=1.5, alpha=0.7, label='Ideal fit line')
-                
+
                 # 绘制拟合线（不显示label）
                 fit_line = slope * np.array([vmin, vmax]) + intercept
                 ax.plot([vmin, vmax], fit_line, 'r-', lw=2, alpha=0.8)
-                
+
                 # 确定单位（使用标准论文格式）
                 if target == 'CO':
                     unit_display = 'mg/m$^3$'
@@ -1603,10 +1581,10 @@ class SiteBasedAnalysisPipeline:
                 ax.set_xlabel(f"Observed {formatted_target} ({unit_display})", fontsize=12)
                 ax.set_ylabel(f"Predicted {formatted_target} ({unit_display})", fontsize=12)
                 ax.set_title(f"{formatted_target}-{model}", fontsize=14, fontweight='bold')
-                
+
                 # 添加图例（放在左上角）
                 ax.legend(loc='upper left', fontsize=9, framealpha=0.9)
-                
+
                 # 添加指标文本（使用动态单位和格式化的污染物名称）
                 metrics_text = (
                     f'$R^2$ = {r2:.3f}\n'
@@ -1617,12 +1595,12 @@ class SiteBasedAnalysisPipeline:
                 ax.text(0.02, 0.91, metrics_text, transform=ax.transAxes,
                         fontsize=9, verticalalignment='top',
                         horizontalalignment='left', family='sans-serif',
-                        bbox=dict(boxstyle='round,pad=0.5', facecolor='white', 
+                        bbox=dict(boxstyle='round,pad=0.5', facecolor='white',
                                  edgecolor='none', alpha=0.85))
-                
+
                 ax.grid(alpha=0.3, linestyle='--', linewidth=0.5)
                 ax.set_aspect('equal', adjustable='box')
-                
+
                 plt.tight_layout()
                 plt.savefig(os.path.join(paths['scatter'], f"{target}_{model}_KDE.png"), dpi=300, bbox_inches='tight')
                 plt.close('all')  # 释放内存
@@ -1643,62 +1621,62 @@ class SiteBasedAnalysisPipeline:
         try:
             # 采样数据（避免计算量过大）
             X_sub = X[np.random.choice(X.shape[0], min(200, X.shape[0]), replace=False)]
-            
+
             # 选择合适的explainer
             if model_name == 'linear_regression':
                 explainer = shap.LinearExplainer(model, X_sub)
             else:
                 explainer = shap.TreeExplainer(model)
-            
+
             shap_values = explainer.shap_values(X_sub)
-            
+
             # 创建SHAP summary plot
             fig, ax = plt.subplots(figsize=(10, 6))
-            
+
             # 标准化特征名称（用于显示）
             standardized_features = [self.standardize_feature_name(f) for f in features]
-            
+
             # 使用summary_plot，限制显示特征数量
             shap.summary_plot(
-                shap_values, 
-                X_sub, 
+                shap_values,
+                X_sub,
                 feature_names=standardized_features,  # 使用标准化后的特征名称
                 max_display=15,  # 只显示Top 15特征
                 show=False,
                 plot_size=(10, 6)
             )
-            
+
             # 优化标题
             formatted_target = format_pollutant_name(target)
-            plt.title(f"Feature Importance: {formatted_target}-{model_name}", 
+            plt.title(f"Feature Importance: {formatted_target}-{model_name}",
                      fontsize=14, fontweight='bold', pad=15)
-            
+
             # 优化xlabel
             plt.xlabel('SHAP Value (impact on model output)', fontsize=12)
-            
+
             plt.tight_layout()
-            plt.savefig(os.path.join(paths['shap'], f"{target}_{model_name}_SHAP.png"), 
+            plt.savefig(os.path.join(paths['shap'], f"{target}_{model_name}_SHAP.png"),
                        dpi=300, bbox_inches='tight')
             plt.close('all')  # 释放内存
-            
+
             # 显式删除临时变量
             del X_sub, explainer, shap_values
             gc.collect()  # 强制回收内存
-            
+
         except Exception as e:
             # 如果SHAP分析失败，记录但不中断流程
             plt.close('all')  # 确保失败时也关闭图表
             print(f"⚠️  SHAP分析失败 ({target}-{model_name}): {str(e)}")
             import traceback
             traceback.print_exc()
-    
+
     def standardize_feature_name(self, feature_name):
         """标准化特征名称（论文规范）"""
         # 去除空格
         feature_name = feature_name.strip()
         # 查找映射
         return self.FEATURE_NAME_MAP.get(feature_name, feature_name)
-    
+
     def calc_importance(self, model, features, target, model_name, paths):
         """计算特征权重（标准化版）"""
         imp = None
@@ -1706,31 +1684,31 @@ class SiteBasedAnalysisPipeline:
             imp = model.feature_importances_
         elif hasattr(model, 'coef_'):
             imp = np.abs(model.coef_)
-        
+
         if imp is not None:
             # 创建特征重要性DataFrame
             df = pd.DataFrame({
                 'Original_Name': features,  # 原始名称
                 'Importance': imp
             })
-            
+
             # 标准化特征名称（用于图表）
             df['Feature_Display'] = df['Original_Name'].apply(self.standardize_feature_name)
-            
+
             # CSV专用名称（不使用LaTeX）
             df['Feature_CSV'] = df['Original_Name'].apply(
                 lambda x: self.CSV_FEATURE_NAME_MAP.get(x.strip(), x)
             )
-            
+
             # 添加单位（基于显示名称）
             df['Unit'] = df['Feature_Display'].apply(lambda x: self.FEATURE_UNITS.get(x, '-'))
-            
+
             # 计算占比
             df['Contribution (%)'] = (df['Importance'] / df['Importance'].sum() * 100).round(2)
-            
+
             # 按重要性排序
             df = df.sort_values('Contribution (%)', ascending=False)
-            
+
             # 保存标准化的特征权重（用于CSV，不含LaTeX）
             output_df = df[['Feature_CSV', 'Unit', 'Importance', 'Contribution (%)']].copy()
             output_df.columns = ['Feature', 'Unit', 'Importance', 'Contribution (%)']
@@ -1738,7 +1716,7 @@ class SiteBasedAnalysisPipeline:
                 os.path.join(paths['data'], f"{target}_{model_name}_Feature_Importance.csv"),
                 index=False, encoding='utf-8-sig'
             )
-            
+
             # 2. 保存特征详细说明文件（包含映射+物理意义，合并为一个文件）
             detail_df = df[['Original_Name', 'Feature_CSV', 'Unit']].copy()
             # 添加描述列（基于显示名称）
@@ -1762,12 +1740,12 @@ if __name__ == "__main__":
                        help='预测目标，用逗号分隔（默认: PM2.5,PM10,O3,SO2,NO2,CO）')
     parser.add_argument('--output-dir', type=str, default='./分析结果',
                        help='输出目录（默认: ./分析结果）')
-    
+
     args = parser.parse_args()
-    
+
     # 解析targets
     targets = [t.strip() for t in args.targets.split(',')]
-    
+
     # 运行分析
     pipeline = SiteBasedAnalysisPipeline(output_dir=args.output_dir)
     pipeline.run(
